@@ -1,0 +1,18 @@
+[Unit]
+Description=SEC BLE Controller Service
+After=bluetooth.target network.target
+Requires=bluetooth.target
+
+[Service]
+Type=simple
+
+User=arduino
+WorkingDirectory=/home/arduino/ExternalServices/controller_service
+
+ExecStart=/home/arduino/ExternalServices/controller_service/.venv/bin/python /home/arduino/ExternalServices/controller_service/server.py
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

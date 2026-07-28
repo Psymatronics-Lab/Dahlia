@@ -1,0 +1,55 @@
+#######################################
+# Syntax Coloring Map for HXServo
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+HXServo	KEYWORD1
+ServoStatus_t	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+ping	KEYWORD2
+general_write	KEYWORD2
+general_read	KEYWORD2
+reg_write	KEYWORD2
+reg_action	KEYWORD2
+sync_write	KEYWORD2
+sync_read	KEYWORD2
+enable_torque	KEYWORD2
+disable_torque	KEYWORD2
+cali_pos	KEYWORD2
+select_mode	KEYWORD2
+write_pos	KEYWORD2
+write_pos_offset	KEYWORD2
+write_acc	KEYWORD2
+write_speed	KEYWORD2
+write_pos_ex	KEYWORD2
+write_pwm_speed	KEYWORD2
+write_max_torque	KEYWORD2
+write_reg_pos_ex	KEYWORD2
+sync_write_pos_ex	KEYWORD2
+sync_read_cur_pos_ex	KEYWORD2
+read_pos_offset	KEYWORD2
+read_pos	KEYWORD2
+read_speed	KEYWORD2
+read_pos_speed	KEYWORD2
+read_temperature	KEYWORD2
+read_voltage	KEYWORD2
+read_current	KEYWORD2
+read_load	KEYWORD2
+read_moving_status	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+BROADCAST_ID	LITERAL1
+POSITION_MODE	LITERAL1
+CLOSED_LOOP_MOTOR_MODE	LITERAL1
+OPEN_LOOP_MOTOR_MODE	LITERAL1
