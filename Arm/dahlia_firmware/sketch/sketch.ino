@@ -5,9 +5,7 @@ DahliaArm arm;
 
 void setup(){
   Serial.begin(115200);
-  if (!arm.initialize()){
-    Serial.println("Gripper PWM setup failed");
-  }
+  arm.initialize();
 }
 
 void loop() {

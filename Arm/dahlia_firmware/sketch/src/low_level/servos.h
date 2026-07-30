@@ -1,58 +1,63 @@
-#pragma once
-
+#include <Servo.h>
 #include <HXServo.h>
-#include <zephyr/drivers/pwm.h>
-#include <zephyrPinctrl.h>
 
-// The gripper runs on hardware PWM rather the Servo library. 
-static const struct pwm_dt_spec GRIPPER_PWM = PWM_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);   // Index 0 is digital pin 2
-constexpr int GRIPPER_PIN_INDEX = 0;   // PB3 in digital 2 Arduino pin-control state
-constexpr int GRIPPER_PERIOD_NS = 20000000;   // 50Hz frame
-constexpr int GRIPPER_OPEN_NS = 544000;   // Pulse width at full open
-constexpr int GRIPPER_CLOSED_NS = 2400000;   // Pulse width at full close
-constexpr float CLAMP_OPEN_MM = 55.0f;
-constexpr float CLAMP_CLOSED_MM = 5.0f;
-
+constexpr int SIGPIN = 3;
 constexpr float RAD_PER_TICK = 0.0015f;
 
 class EndEffector{
     public:
-        EndEffector(){
-            this->pulse_ns = GRIPPER_OPEN_NS;
-            this->clamp_width = CLAMP_OPEN_MM;
-        }
+        EndEffector(int SIGPIN)
+            : SIGPIN(SIGPIN),
+              raw_pos(0),
+              clamp_width(0.0f)
+            {}
 
-        /**
-         * @brief Route the pin to its timer channel and open the clamp.
-         * @return false if the timer rejected the 20ms period.
-         */
-        bool initialize(){
-            zephyr::arduino::init_dev_apply_channel_pinctrl(GRIPPER_PWM.dev, GRIPPER_PIN_INDEX);
-            bool ok = full_open();
+        void initialize(){
+            drive_servo.attach(SIGPIN);
+            raw_pos = 0;
+            clamp_width = 55.0f;
+            drive_servo.write(raw_pos);
             delay(100);   // Blocking delay for servo to traverse
-            return ok;
         }
 
-        bool full_open(){
-            return set_closure(0.0f);
+        void full_open(){
+            raw_pos = 0;
+            clamp_width = 55.0f;
+            drive_servo.write(raw_pos);
         }
 
-        bool full_close(){
-            return set_closure(1.0f);
+        void full_close(){
+            raw_pos = 180;
+            clamp_width = 5.0f;
+            drive_servo.write(raw_pos);
         }
 
-        /**
-         * @brief Set the opening size of the clamp in millimeters, [5.0mm, 55.0mm].
-         */
-        bool set_pos(float width){
-            return set_closure((CLAMP_OPEN_MM - width) / (CLAMP_OPEN_MM - CLAMP_CLOSED_MM));
+        void set_pos(float width){
+            if (width >= 55.0f){
+                full_open();
+                return;
+            }
+            if (width <= 5.0f){
+                full_close();
+                return;
+            }
+            raw_pos = lroundf((width - 5.0f) / 50.0f * 180.0f);
+            clamp_width = width;
+            drive_servo.write(raw_pos);
         }
 
-        /**
-         * @brief Set the closure of the clamp, 0.0 fully open to 1.0 fully closed.
-         */
-        bool set_pos_norm(float closure){
-            return set_closure(closure);
+        void set_pos_norm(float width){
+            if (width >= 1.0f){
+                full_close();
+                return;
+            }
+            if (width <= 0.0f){
+                full_open();
+                return;
+            }
+            raw_pos = lroundf(width * 180.0f);
+            clamp_width = width * 50.0f + 5.0f;
+            drive_servo.write(raw_pos);
         }
 
         float pos(){
@@ -60,21 +65,13 @@ class EndEffector{
         }
 
         int pos_raw(){
-            return pulse_ns / 1000;
+            return raw_pos;
         }
 
     private:
-        /**
-         * @brief Drive the servo to a closure fraction, clamped to [0.0, 1.0].
-         */
-        bool set_closure(float closure){
-            closure = constrain(closure, 0.0f, 1.0f);
-            this->clamp_width = CLAMP_OPEN_MM - closure * (CLAMP_OPEN_MM - CLAMP_CLOSED_MM);
-            this->pulse_ns = GRIPPER_OPEN_NS + lroundf(closure * (GRIPPER_CLOSED_NS - GRIPPER_OPEN_NS));
-            return pwm_set_dt(&GRIPPER_PWM, GRIPPER_PERIOD_NS, this->pulse_ns) == 0;
-        }
-
-        int pulse_ns;   // Servo pulse width, [544us, 2400us]
+        int SIGPIN;
+        Servo drive_servo;
+        int raw_pos;   // Raw servo position, [0, 180]
         float clamp_width;   // Opening size of the clamp in millimeters, [5.0mm, 55.0mm]
 };
 
@@ -117,21 +114,18 @@ enum JointID {
 
 class DahliaArm{
     public:
-        DahliaArm() : bus_servos(Serial1, 1000000){
-            this->last_motion_update = 0;
-        }
+        DahliaArm()
+        : bus_servos(Serial1, 1000000),
+          end_effector(SIGPIN),
+          last_motion_update(0)
+        {}
 
-        /**
-         * @brief Bring up the bus, the gripper and the joint states.
-         * @return false if the gripper PWM channel could not be configured.
-         */
-        bool initialize(){
+        void initialize(){
             bus_servos.begin();
-            bool ok = end_effector.initialize();
+            end_effector.initialize();
             enable();
             refresh_state();
             last_motion_update = millis();
-            return ok;
         }
 
         /**
@@ -200,20 +194,13 @@ class DahliaArm{
          * @brief Refresh high-level telemetry states of all servos.
          */
         void refresh_state(){
-            uint8_t ids[JOINT_COUNT];
-            int16_t telemetry[JOINT_COUNT][5];
-
             for(int i = 0; i < JOINT_COUNT; i++){
-                ids[i] = (uint8_t)joint_configs[i].servo_id;
-            }
-
-            ServoStatus_t status = bus_servos.sync_read_cur_pos_ex(ids, JOINT_COUNT, telemetry);
-            if (status.error_bits.bit_tx || status.error_bits.bit_rx){ return; }
-
-            for(int i = 0; i < JOINT_COUNT; i++){
-                joint_states[i].current_pos = telemetry[i][0];
-                joint_states[i].current_vel = telemetry[i][1];
-                joint_states[i].moving = (telemetry[i][1] != 0);
+                int16_t position = 0;
+                int16_t speed = 0;
+                bus_servos.read_pos_speed(joint_configs[i].servo_id, &position, &speed);
+                joint_states[i].current_pos = position;
+                joint_states[i].current_vel = speed;
+                joint_states[i].moving = (speed != 0);
             }
         }
 

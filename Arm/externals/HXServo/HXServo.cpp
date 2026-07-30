@@ -19,14 +19,6 @@
 /* Clamp x to [min, max]. */
 #define LIMIT(x, min, max) (((x) < (min)) ? (min) : ((x) > (max)) ? (max) : (x))
 
-/* Microseconds one 8N1 byte occupies on the wire (8 data + start + stop bits). */
-#define WIRE_US_PER_BYTE(baud) (10000000UL / (baud))
-
-/* Gap between polls while waiting for a late reply. Sleeping keeps available()
- * off the hot path: on some cores it takes a lock, and hammering it masks
- * interrupts often enough to jitter timing-sensitive work elsewhere. */
-#define RX_POLL_US 50
-
 /* -------------------------------------------------------------------------
  * Construction / start-up
  * ---------------------------------------------------------------------- */
@@ -43,7 +35,6 @@ HXServo::HXServo(HardwareSerial &serial, uint32_t baud)
 void HXServo::begin()
 {
     uart->begin(baudrate, SERIAL_8N1);
-    uart->setTimeout(rx_timeout);   /* Bound readBytes() in unpack(). */
 }
 
 void HXServo::begin(uint32_t baud)
@@ -95,48 +86,66 @@ uint8_t HXServo::data_check(const uint8_t buf[], uint8_t len)
 /* -------------------------------------------------------------------------
  * Frame parsing (receive)
  * ---------------------------------------------------------------------- */
-/* Pulls exactly one expected-length frame in, resyncs past any leading garbage
- * and validates it in memory. The original drove a byte-at-a-time state machine
- * off available(), so it quit mid-frame whenever the parser outran the wire and
- * folded read()'s -1 into the payload -- both of which forced a 20ms timeout. */
 uint8_t HXServo::unpack()
 {
-    uint8_t *buf = rx_packet.data_raw;
-    uint8_t want = rx_frame_length;
-    uint8_t len;
-    uint8_t skip = 0;
+    uint8_t error;
+    uint8_t check_value;
 
     rx_status = PACKET_HEADER_1;
 
-    if (want > sizeof(rx_packet.data_raw)) {
-        want = sizeof(rx_packet.data_raw);
-    }
-    len = (uint8_t)uart->readBytes(buf, want);
+    while (uart->available()) {
+        switch (rx_status) {
+            case PACKET_HEADER_1:
+                rx_packet.header_1 = uart->read();
+                rx_status = rx_packet.header_1 == FRAME_HEADER_1 ? PACKET_HEADER_2 : PACKET_HEADER_1;
+                break;
 
-    /* Drop anything ahead of the header, then top the frame back up. */
-    while (skip + 1 < len && !(buf[skip] == FRAME_HEADER_1 && buf[skip + 1] == FRAME_HEADER_2)) {
-        skip++;
-    }
-    if (skip) {
-        len -= skip;
-        memmove(buf, buf + skip, len);
-        len += (uint8_t)uart->readBytes(&buf[len], skip);
+            case PACKET_HEADER_2:
+                rx_packet.header_2 = uart->read();
+                rx_status = rx_packet.header_2 == FRAME_HEADER_2 ? PACKET_ID : PACKET_HEADER_1;
+                break;
+
+            case PACKET_ID:
+                rx_packet.elements.id = uart->read();
+                rx_status = rx_packet.elements.id <= BROADCAST_ID ? PACKET_DATA_LENGTH : PACKET_HEADER_1;
+                break;
+
+            case PACKET_DATA_LENGTH:
+                rx_packet.elements.length = uart->read();
+                rx_status = rx_packet.elements.length <= HX_MAX_FRAME_SIZE + 1 ? PACKET_CMD : PACKET_HEADER_1;
+                break;
+
+            case PACKET_CMD:
+                rx_packet.elements.cmd = uart->read();
+                rx_status = rx_packet.elements.cmd <= CMD_SYNC_READ ? PACKET_PARAMETERS : PACKET_HEADER_1;
+                break;
+
+            case PACKET_PARAMETERS:
+                for (uint8_t i = 0; i < rx_packet.elements.length - 2; i++) {
+                    rx_packet.elements.args[i] = uart->read();
+                }
+                rx_status = PACKET_CHECKSUM;
+                break;
+
+            case PACKET_CHECKSUM:
+                rx_packet.elements.args[rx_packet.elements.length - 2] = uart->read();
+                check_value = data_check((const uint8_t *)&rx_packet, rx_packet.elements.length + 3);
+                rx_status = rx_packet.elements.args[rx_packet.elements.length - 2] == check_value
+                                ? PACKET_FINISH
+                                : PACKET_HEADER_1;
+                break;
+
+            default:
+                break;
+        }
+
+        if (rx_status == PACKET_FINISH) {
+            break;
+        }
     }
 
-    if (len < 6 || buf[0] != FRAME_HEADER_1 || buf[1] != FRAME_HEADER_2) {
-        return 1;
-    }
-    if (rx_packet.elements.id > BROADCAST_ID || rx_packet.elements.length < 2 ||
-        rx_packet.elements.length + 4 > len) {
-        return 1;
-    }
-    if (rx_packet.elements.args[rx_packet.elements.length - 2] !=
-        data_check(buf, rx_packet.elements.length + 3)) {
-        return 1;
-    }
-
-    rx_status = PACKET_FINISH;
-    return 0;
+    error = rx_status == PACKET_FINISH ? 0 : 1;
+    return error;
 }
 
 /* -------------------------------------------------------------------------
@@ -168,11 +177,6 @@ uint8_t HXServo::tx_frame_write(uint8_t id, uint8_t cmd, const uint8_t *data, ui
     HX_DEBUG_STREAM.println();
 #endif
 
-    /* Drop stale or echoed bytes so ack() cannot match on them. */
-    while (uart->available() > 0) {
-        (void)uart->read();
-    }
-
     return uart->write(packet, frame_len);
 }
 
@@ -182,26 +186,23 @@ uint8_t HXServo::tx_frame_write(uint8_t id, uint8_t cmd, const uint8_t *data, ui
 ServoStatus_t HXServo::ack()
 {
     ServoStatus_t status;
-    uint32_t wire_us;
+    uint8_t size;
     uint32_t tickstart;
 
     status.id = 0xFF;
     status.error_byte = 0;
 
     if (!rx_skip) {
-        /* The reply cannot land before the wire has carried it, so sleep through
-         * that window instead of spinning on available(). */
-        wire_us = (uint32_t)rx_frame_length * WIRE_US_PER_BYTE(baudrate);
-        delay(wire_us / 1000);
-        delayMicroseconds(wire_us % 1000);
-
         tickstart = millis();
-        while (uart->available() < (int)rx_frame_length) {
+        while (1) {
+            size = uart->available();
+            if (size >= rx_frame_length) {
+                break;
+            }
             if (millis() - tickstart > rx_timeout) {
                 status.error_bits.bit_rx = 1;
                 return status;
             }
-            delayMicroseconds(RX_POLL_US);
         }
 
         if (unpack()) {
@@ -361,7 +362,7 @@ ServoStatus_t HXServo::sync_write(uint8_t addr, uint8_t *data, uint8_t data_len,
 ServoStatus_t HXServo::sync_read(uint8_t addr, uint8_t byte_num, uint8_t *id, uint8_t id_num, uint8_t *data)
 {
     ServoStatus_t status;
-    const uint8_t total_size = 2 + id_num;   /* addr + byte_num + one ID each */
+    const uint8_t total_size = 1 + byte_num + id_num;
     uint8_t buf[total_size];
 
     buf[0] = addr;
