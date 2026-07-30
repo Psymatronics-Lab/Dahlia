@@ -1,35 +1,40 @@
-#include <Servo.h>
 #include <HXServo.h>
+#include <zephyr/drivers/pwm.h>
+#include <zephyrPinctrl.h>
 
 constexpr int SIGPIN = 3;
+static const struct pwm_dt_spec END_EFFECTOR_PWM = PWM_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 1);
+constexpr int END_EFFECTOR_PWM_PIN_INDEX = 0;
+constexpr int END_EFFECTOR_PERIOD_NS = 20000000;
+constexpr int END_EFFECTOR_OPEN_NS = 544000;
+constexpr int END_EFFECTOR_CLOSED_NS = 2400000;
 constexpr float RAD_PER_TICK = 0.0015f;
 
 class EndEffector{
     public:
-        EndEffector(int SIGPIN)
-            : SIGPIN(SIGPIN),
-              raw_pos(0),
+        EndEffector(int)
+            : raw_pos(0),
               clamp_width(0.0f)
             {}
 
         void initialize(){
-            drive_servo.attach(SIGPIN);
+            zephyr::arduino::init_dev_apply_channel_pinctrl(END_EFFECTOR_PWM.dev, END_EFFECTOR_PWM_PIN_INDEX);
             raw_pos = 0;
             clamp_width = 55.0f;
-            drive_servo.write(raw_pos);
+            write_raw();
             delay(100);   // Blocking delay for servo to traverse
         }
 
         void full_open(){
             raw_pos = 0;
             clamp_width = 55.0f;
-            drive_servo.write(raw_pos);
+            write_raw();
         }
 
         void full_close(){
             raw_pos = 180;
             clamp_width = 5.0f;
-            drive_servo.write(raw_pos);
+            write_raw();
         }
 
         void set_pos(float width){
@@ -43,7 +48,7 @@ class EndEffector{
             }
             raw_pos = lroundf((width - 5.0f) / 50.0f * 180.0f);
             clamp_width = width;
-            drive_servo.write(raw_pos);
+            write_raw();
         }
 
         void set_pos_norm(float width){
@@ -57,7 +62,7 @@ class EndEffector{
             }
             raw_pos = lroundf(width * 180.0f);
             clamp_width = width * 50.0f + 5.0f;
-            drive_servo.write(raw_pos);
+            write_raw();
         }
 
         float pos(){
@@ -69,8 +74,11 @@ class EndEffector{
         }
 
     private:
-        int SIGPIN;
-        Servo drive_servo;
+        void write_raw(){
+            int pulse_ns = END_EFFECTOR_OPEN_NS + lroundf(raw_pos / 180.0f * (END_EFFECTOR_CLOSED_NS - END_EFFECTOR_OPEN_NS));
+            pwm_set_dt(&END_EFFECTOR_PWM, END_EFFECTOR_PERIOD_NS, pulse_ns);
+        }
+
         int raw_pos;   // Raw servo position, [0, 180]
         float clamp_width;   // Opening size of the clamp in millimeters, [5.0mm, 55.0mm]
 };
