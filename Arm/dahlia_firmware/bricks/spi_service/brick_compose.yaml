@@ -1,0 +1,12 @@
+services:
+  spi_service:
+    image: debian:bookworm-slim
+    user: root
+    devices:
+      - /dev/spidev0.0
+    volumes:
+      - .:/spi_service
+    command: >
+      sh -c "apt update &&
+             apt install -y python3 python3-spidev &&
+             python3 /spi_service/spi_service.py"

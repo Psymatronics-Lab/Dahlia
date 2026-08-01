@@ -80,7 +80,7 @@ class SPIService {
         }
 
     private:
-        static constexpr size_t FRAME_SIZE = max(sizeof(TX), sizeof(RX));
+        static constexpr size_t FRAME_SIZE = (sizeof(TX) > sizeof(RX)) ? sizeof(TX) : sizeof(RX);
 
         const struct device *const spi_device = DEVICE_DT_GET(
             DT_BUS(DT_COMPAT_GET_ANY_STATUS_OKAY(zephyr_spi_slave)));

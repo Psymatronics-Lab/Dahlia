@@ -1,12 +1,9 @@
-import atexit
-import signal
-import sys
 import time
 
 import requests
 
 from arduino.app_utils import App
-from spi import spi_service
+from spi_service import SPIService
 
 CONTROLLER_URL = "http://172.17.0.1:8000/controller"
 
@@ -16,19 +13,25 @@ PERIOD = 0.05
 JOY_RANGE = 1000.0   # Full scale joystick counts
 JOY_DEADZONE = 0.05   # Normalized joystick deadzone
 MAX_JOINT_VEL = 1.5   # Radians per second at full deflection
-ENC_COUNTS_CLOSED = 30   # Encoder counts from fully open to fully closed
+
+WRIST_PITCH = 3
+WRIST_ROLL = 4
 
 # Joint limits in radians, matching servo_interface.h
 JOINT_LIMITS = [
     (-1.917, 1.917),   # BASE
     (-0.307, 3.375),   # SHOULDER
-    (0.0, 3.467),   # ELBOW
+    (0.0, 3.467),      # ELBOW
     (-1.534, 1.534),   # WRIST_PITCH
     (-1.457, 1.457)    # WRIST_ROLL
 ]
 
+spi = SPIService()
 targets = [0.0] * NUM_JOINTS
 seeded = False
+
+gripper_closed = False
+enc_was_pressed = False
 
 
 def clamp(value, low, high):
@@ -45,11 +48,25 @@ def axis(counts):
     return value
 
 
+def update_gripper(pressed):
+    """Toggle the gripper on each encoder button press.
+    @return Clamp closure byte, 0 = open, 255 = closed
+    """
+    global gripper_closed, enc_was_pressed
+
+    if pressed and not enc_was_pressed:
+        gripper_closed = not gripper_closed
+
+    enc_was_pressed = pressed
+
+    return 255 if gripper_closed else 0
+
+
 def seed_targets():
     """Start from the arm's measured pose so the first command does not jump."""
     global targets
 
-    feedback = spi_service.get_feedback()
+    feedback = spi.read_feedback()
 
     if not feedback["ok"]:
         return False
@@ -85,10 +102,10 @@ def loop():
 
     state = data["state"]
 
-    # Joystick jogs the base and shoulder, encoder sets the gripper
+    # Joystick jogs the wrist, every other joint holds its seeded pose at zero velocity
     velocities = [0.0] * NUM_JOINTS
 
-    for joint, counts in enumerate([state["joy_x"], state["joy_y"]]):
+    for joint, counts in [(WRIST_PITCH, state["joy_y"]), (WRIST_ROLL, state["joy_x"])]:
 
         rate = axis(counts) * MAX_JOINT_VEL
 
@@ -97,21 +114,16 @@ def loop():
         targets[joint] = clamp(targets[joint] + rate * PERIOD, low, high)
         velocities[joint] = abs(rate)
 
-    gripper = int(clamp(state["enc_pos"] / ENC_COUNTS_CLOSED, 0.0, 1.0) * 255)
+    gripper = update_gripper(state["enc_pressed"])
 
-    spi_service.set_command(targets, velocities, gripper)
+    if not spi.write_targets(targets, velocities, gripper):
+        print("SPI service unavailable")
+        seeded = False   # Re-seed from the measured pose once it comes back
 
     time.sleep(PERIOD)
 
 
-def shutdown(signum, frame):   # Turn a kill signal into a normal exit so atexit runs
-    sys.exit(0)
-
-
-spi_service.start()
-
-atexit.register(spi_service.stop)
-signal.signal(signal.SIGTERM, shutdown)
-signal.signal(signal.SIGINT, shutdown)
+if not spi.begin():
+    print("SPI service did not come up, retrying in the loop")
 
 App.run(user_loop=loop)

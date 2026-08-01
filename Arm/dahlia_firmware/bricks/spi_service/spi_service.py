@@ -2,11 +2,7 @@
 
 Every SPI transaction swaps the newest command for the newest feedback. The HTTP
 server and the SPI loop are independent: any source (BLE teleop, a planner, a VLA)
-sets a command, and the SPI thread keeps the MCU synchronized at 100 Hz.
-
-Call start() to run the service in the background, stop() to shut it down. In
-process sources use set_command() and get_feedback(); everyone else POSTs to
-/targets and GETs /feedback.
+just POSTs to /targets, and the SPI thread keeps the MCU synchronized at 100 Hz.
 """
 
 import json
@@ -43,42 +39,19 @@ lock = threading.Lock()
 latest_command = RobotCommand()
 latest_feedback = {"ok": False, "error": "No frame yet"}
 
-running = threading.Event()   # Cleared by stop() to end the exchange thread
-spi = None
-spi_thread = None
-server = None
-
-
-def set_command(positions, velocities, gripper):
-    """Replace the newest command, from any source."""
-    global latest_command
-
-    if len(positions) != NUM_JOINTS or len(velocities) != NUM_JOINTS:
-        raise ValueError("Expected %d joints" % NUM_JOINTS)
-
-    command = RobotCommand(
-        [float(x) for x in positions],
-        [float(x) for x in velocities],
-        int(gripper) & 0xFF
-    )
-
-    with lock:   # Lock to prevent spi_loop from reading the command while changing
-        latest_command = command
-
-
-def get_feedback():
-    """Newest feedback frame received from the MCU."""
-    with lock:
-        return dict(latest_feedback)
+spi = spidev.SpiDev()
+spi.open(0, 0)
+spi.max_speed_hz = 1000000
+spi.mode = 0
 
 
 def spi_loop():
-    """Send the newest command and store the newest feedback until stopped."""
+    """Send the newest command and store the newest feedback, forever."""
     global latest_feedback
 
     sequence = 0
 
-    while running.is_set():
+    while True:
         with lock:   # Lock to prevent race conditions when formulating the command
             command = RobotCommand(
                 list(latest_command.positions),
@@ -126,6 +99,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):   # Handle an incoming POST request
 
+        global latest_command
+
         if self.path != "/targets":
             self.send_error(404)
             return
@@ -135,11 +110,21 @@ class Handler(BaseHTTPRequestHandler):
 
             data = json.loads(self.rfile.read(length))
 
-            set_command(data["positions"], data["velocities"], data["gripper"])
+            command = RobotCommand(
+                [float(x) for x in data["positions"]],
+                [float(x) for x in data["velocities"]],
+                int(data["gripper"]) & 0xFF
+            )
+
+            if len(command.positions) != NUM_JOINTS or len(command.velocities) != NUM_JOINTS:
+                raise ValueError("Expected %d joints" % NUM_JOINTS)
 
         except Exception as e:
             self.send_error(400, str(e))
             return
+
+        with lock:   # Lock to prevent spi_loop from reading the command while changing
+            latest_command = command
 
         self.reply({"ok": True})
 
@@ -149,7 +134,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        self.reply(get_feedback())
+        with lock:
+            payload = dict(latest_feedback)
+
+        self.reply(payload)
 
     def reply(self, payload):   # Build the HTML reply
 
@@ -166,49 +154,14 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def start():
-    """Open the bus and run the exchange thread and HTTP server in the background."""
-    global spi, spi_thread, server
+threading.Thread(target=spi_loop, daemon=True).start()
 
-    if running.is_set():
-        return
+print("SPI state exchange service started on port 9000", flush=True)
 
-    spi = spidev.SpiDev()
-    spi.open(0, 0)
-    spi.max_speed_hz = 1000000
-    spi.mode = 0
+server = HTTPServer((HOST, PORT), Handler)
 
-    running.set()
+try:
+    server.serve_forever()
 
-    spi_thread = threading.Thread(target=spi_loop, daemon=True)
-    spi_thread.start()
-
-    server = HTTPServer((HOST, PORT), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    print("SPI state exchange service started on port %d" % PORT, flush=True)
-
-
-def stop():
-    """Stop serving, end the exchange thread and close the bus. Safe to call twice."""
-    global spi, spi_thread, server
-
-    if not running.is_set():
-        return
-
-    running.clear()   # Cleared first so the exchange thread stops before the bus closes
-
-    if server is not None:
-        server.shutdown()
-        server.server_close()
-        server = None
-
-    if spi_thread is not None:
-        spi_thread.join(timeout=1.0)
-        spi_thread = None
-
-    if spi is not None:
-        spi.close()
-        spi = None
-
-    print("SPI state exchange service stopped", flush=True)
+finally:
+    spi.close()
