@@ -36,7 +36,7 @@ class RobotCommand:
 
 
 lock = threading.Lock()
-latest_command = RobotCommand()
+latest_command = None   # Stays None until a source sets one
 latest_feedback = {"ok": False, "error": "No frame yet"}
 
 spi = spidev.SpiDev()
@@ -53,15 +53,17 @@ def spi_loop():
 
     while True:
         with lock:   # Lock to prevent race conditions when formulating the command
-            command = RobotCommand(
-                list(latest_command.positions),
-                list(latest_command.velocities),
-                latest_command.gripper
-            )
+            command = latest_command
+
+        # Magic 0 until a real command exists, so the MCU rejects the frame and holds its own pose
+        magic = COMMAND_MAGIC if command is not None else 0x00
+
+        if command is None:
+            command = RobotCommand()
 
         tx = struct.pack(
             PACKET_FORMAT,
-            COMMAND_MAGIC,
+            magic,
             sequence,
             *command.positions,
             *command.velocities,

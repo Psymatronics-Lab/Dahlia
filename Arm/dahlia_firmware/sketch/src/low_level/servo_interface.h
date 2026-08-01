@@ -205,7 +205,10 @@ class DahliaArm{
             for(int i = 0; i < JOINT_COUNT; i++){
                 int16_t position = 0;
                 int16_t speed = 0;
-                bus_servos.read_pos_speed(joint_configs[i].servo_id, &position, &speed);
+                ServoStatus_t status = bus_servos.read_pos_speed(joint_configs[i].servo_id, &position, &speed);
+                if (status.error_bits.bit_tx || status.error_bits.bit_rx){
+                    continue;   // Failed reads report zero, so keep the last good one
+                }
                 joint_states[i].current_pos = position;
                 joint_states[i].current_vel = speed;
                 joint_states[i].moving = (speed != 0);
