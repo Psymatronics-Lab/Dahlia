@@ -6,6 +6,7 @@ static_assert(JOINT_COUNT == SPI_JOINT_COUNT, "Packet joint count must match the
 constexpr int SERVO_PERIOD_MS = 5;   // 200 Hz servo loop
 constexpr int SPI_STACK_SIZE = 2048;
 constexpr int SPI_PRIORITY = 5;
+constexpr float HOLD_VEL = 5.0f;   // Radians per second, matches JOINT_VEL on the host
 
 DahliaArm arm;
 SPIService<FeedbackPacket, CommandPacket> spi;
@@ -67,7 +68,7 @@ void setup(){
     // Hold the startup pose until the host sends its first command
     for (int i = 0; i < JOINT_COUNT; i++){
         shared.target_position[i] = arm.get_pos((JointID)i);
-        shared.target_velocity[i] = 0.0f;
+        shared.target_velocity[i] = HOLD_VEL;
     }
     shared.gripper = 0.0f;
 

@@ -37,6 +37,7 @@ JOINT_LIMITS = [
 
 spi = SPIService()
 targets = [0.0] * NUM_JOINTS
+jogging = [False] * NUM_JOINTS
 seeded = False
 
 gripper_closed = False
@@ -111,14 +112,24 @@ def loop():
 
     state = data["state"]
 
+    feedback = spi.read_feedback()
+
     # Joystick slews the wrist targets, every other joint holds its seeded pose
     velocities = [JOINT_VEL] * NUM_JOINTS
 
     for joint, counts in [(WRIST_PITCH, state["joy_y"]), (WRIST_ROLL, state["joy_x"])]:
 
+        deflection = axis(counts)
         low, high = JOINT_LIMITS[joint]
 
-        targets[joint] = clamp(targets[joint] + axis(counts) * JOG_RATES[joint] * PERIOD, low, high)
+        if deflection:
+            targets[joint] = clamp(targets[joint] + deflection * JOG_RATES[joint] * PERIOD, low, high)
+
+        elif jogging[joint] and feedback["ok"]:
+            # Input stopped, so drop the target onto the measured pose instead of overshooting to it
+            targets[joint] = clamp(feedback["positions"][joint], low, high)
+
+        jogging[joint] = bool(deflection)
 
     gripper = update_gripper(state["enc_pressed"])
 
