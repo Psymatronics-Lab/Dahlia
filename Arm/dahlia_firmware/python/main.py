@@ -12,10 +12,19 @@ PERIOD = 0.05
 
 JOY_RANGE = 1000.0   # Full scale joystick counts
 JOY_DEADZONE = 0.05   # Normalized joystick deadzone
-MAX_JOINT_VEL = 1.5   # Radians per second at full deflection
+JOINT_VEL = 5.0   # Constant velocity limit sent for every joint, near the servo maximum
 
 WRIST_PITCH = 3
 WRIST_ROLL = 4
+
+# Slew rate in radians per second at full deflection, independent of the velocity limit
+JOG_RATES = [
+    1.5,   # BASE
+    1.5,   # SHOULDER
+    1.5,   # ELBOW
+    1.5,   # WRIST_PITCH
+    1.5    # WRIST_ROLL
+]
 
 # Joint limits in radians, matching servo_interface.h
 JOINT_LIMITS = [
@@ -102,17 +111,14 @@ def loop():
 
     state = data["state"]
 
-    # Joystick jogs the wrist, every other joint holds its seeded pose at zero velocity
-    velocities = [0.0] * NUM_JOINTS
+    # Joystick slews the wrist targets, every other joint holds its seeded pose
+    velocities = [JOINT_VEL] * NUM_JOINTS
 
     for joint, counts in [(WRIST_PITCH, state["joy_y"]), (WRIST_ROLL, state["joy_x"])]:
 
-        rate = axis(counts) * MAX_JOINT_VEL
-
         low, high = JOINT_LIMITS[joint]
 
-        targets[joint] = clamp(targets[joint] + rate * PERIOD, low, high)
-        velocities[joint] = abs(rate)
+        targets[joint] = clamp(targets[joint] + axis(counts) * JOG_RATES[joint] * PERIOD, low, high)
 
     gripper = update_gripper(state["enc_pressed"])
 
