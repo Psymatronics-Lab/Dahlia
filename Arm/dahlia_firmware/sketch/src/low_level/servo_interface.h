@@ -302,10 +302,10 @@ class DahliaArm{
         unsigned long last_motion_update;
         HXServo bus_servos;
         JointConfig joint_configs[JOINT_COUNT] = {
-            {1, 1250, -1250, -1.917f, 1.917f},   // BASE
-            {2, -200, 2200, -0.307f, 3.375f},   // SHOULDER
-            {3, 2250, 0, 0.0f, 3.467f},   // ELBOW
-            {4, -1024, 1024, -1.534f, 1.534f},   // WRIST_PITCH
+            {1, -1250, 1250, -1.917f, 1.917f},   // BASE
+            {2, 2200, -200, -3.375f, 0.307f},   // SHOULDER
+            {3, 2250, 0, 0.0f, 3.451f},   // ELBOW
+            {4, 1024, -1024, -1.534f, 1.534f},   // WRIST_PITCH
             {5, 2700, 800, -1.457f, 1.457f}    // WRIST_ROLL
         };
         JointCommand joint_commands[JOINT_COUNT] = {

@@ -2,3 +2,4 @@
 .cache
 dahlia_hardware/
 sec_hardware/
+**.pyc
