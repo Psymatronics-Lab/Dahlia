@@ -5,263 +5,322 @@ MCU only ever receives joint angles over SPI and never solves kinematics itself.
 
 | File | Role |
 | --- | --- |
-| [`kinematics/ik.py`](kinematics/ik.py) | Analytic forward and inverse kinematics |
-| [`control.py`](control.py) | Controller input → end effector pose → joint targets |
+| [`control/kinematics.py`](control/kinematics.py) | Closed-form forward and inverse kinematics |
+| [`control/control.py`](control/control.py) | Controller input → end effector pose → joint targets |
 | [`main.py`](main.py) | Poll the BLE controller, run the loop, push commands over SPI |
 
 Units are millimetres and radians throughout.
 
 ---
 
-## Part 1 — Inverse Kinematics
+## Part 1 — Kinematics
+
+### The end effector
+
+The end effector is the **tip of the wrist roll joint**. It sits exactly on the roll axis,
+so roll spins the tool without moving the point: position and orientation decouple
+completely, and the last joint drops out of the position problem entirely.
 
 ### Why this arm admits a closed form
 
-The three middle joints — shoulder, elbow, wrist pitch — are parallel, so joints 2–4 form a
-planar 3R mechanism living in a vertical plane selected by the base yaw. The lateral offsets
-cancel by design, so that plane passes exactly through the base axis, which is what makes the
-decoupling clean. No numerical solver, no iteration, no seed sensitivity.
+The base yaws about the vertical. Shoulder, elbow and wrist pitch are all parallel to each
+other and perpendicular to the base axis, so they form a planar 3R chain living in the
+vertical plane the base selects. Wrist roll then spins the tool about its own approach
+axis. No numerical solver, no iteration, no seed sensitivity.
 
-### Task space
+### Task space is cylindrical, not Cartesian
 
-Five degrees of freedom cannot reach an arbitrary 6-DOF pose. The gripper's approach axis can
-only ever lie in the vertical plane containing the base axis and the target point, so the
-natural task space is five-dimensional:
-
-```
-(x, y, z, φ, ψ)
-  x, y, z : end effector point in the root frame
-  φ       : pitch of the approach axis within the arm's vertical plane (+ = up)
-  ψ       : roll about the approach axis
-```
-
-The end effector frame follows the convention **+Z forward (approach), +X up, +Y right**, where
-"right" is as seen from behind the arm looking forward. This falls out of the FK natively at
-ψ = 0 — verified directly:
+Five degrees of freedom cannot reach an arbitrary 6-DOF pose — the approach axis is stuck
+in whatever plane the base selects. So rather than accept Cartesian input and then check
+whether it happens to be legal, this module uses the mechanism's own coordinates:
 
 ```
-home, ψ=0     X=[0.00 0.00 1.00]  Y=[0.00 -1.00 0.00]  Z=[1.00 0.00 0.00]
-              (root frame is +x forward, +y left, +z up)
+reach    distance from the base axis, in the arm plane    (mm)
+height   above the root origin                            (mm)
+yaw      of the arm plane, = the base joint               (rad)
+pitch    of the approach axis, + is up                    (rad)
+roll     about the approach axis, = the wrist roll joint  (rad)
 ```
 
-So EE +Z is root forward, EE +X is root up, and EE +Y is root −y, i.e. right. Base yaw carries
-the whole frame around with it, so the convention holds at any azimuth.
+This is the single biggest simplification over a Cartesian formulation, and it deletes
+three separate sources of trouble rather than working around them:
 
-If you hand `ik_pose()` a full 4×4 pose it first checks that the pose's z-axis lies in the plane
-through the base axis and the target point. When it doesn't, the pose is unreachable no matter
-what, and the function returns the out-of-plane error rather than a wrong answer.
+- **No base-yaw branch.** `yaw` *is* the base joint, so there is nothing to invert. The
+  old Cartesian version needed a second `θ_B ± π` branch with `r → −r`, `φ → π − φ`,
+  `ψ → ψ − π`, and that reparameterization stopped being one-to-one for negative reach.
+- **No base singularity.** At `reach = 0` a Cartesian `atan2(y, x)` is undefined; here
+  yawing at zero reach just spins the base, which is perfectly well defined.
+- **No out-of-plane test.** A pose that misses the reachable plane cannot be expressed in
+  the first place, so there is no lateral-error check to run and no way to ask for one.
 
-### Step 1 — base yaw
+Only three numbers — reach, height, pitch — ever reach the solver. Yaw and roll are joints.
 
-```
-θ_B = atan2(y, x)        r = √(x² + y²)        h = z − 83.5
-```
+### Geometry
 
-A second branch exists at `θ_B ± π` with `r → −r`, reaching backward over the base, where the
-in-plane angles remap as `φ' = π − φ` and `ψ' = ψ − π`.
-
-### Step 2 — wrist decoupling
-
-The last two links (75 mm wrist, 99 mm tool) are collinear with the approach axis, so the
-wrist-pitch joint sits at a known offset from the target — the 5-DOF analogue of the spherical
-wrist trick. Position and orientation decouple there:
+Every constant is measured off `dahlia_m1_full.urdf` by collapsing its fixed joints. Each
+link is stored as a plain polar offset in its parent's frame — a length and the bend angle
+it sits at when its joint reads zero:
 
 ```
-r_w = r − 174·cos φ        h_w = h − 174·sin φ
+base axis      offset  2.2324 mm along +x from the root origin
+shoulder axis  height 83.5115 mm, meeting the base axis to within 1 µm
+L1, B1  157.0616 mm,  2.9569172 rad    shoulder → elbow
+L2, B2  175.7507 mm, −0.0009798 rad    elbow → wrist pitch
+L3, B3   75.5005 mm, −0.0005102 rad    wrist pitch → end effector
+approach axis, −0.0038214 rad off the wrist pitch frame
+sideways offset of the end effector from the arm plane, 0.4502 mm
 ```
 
-### Step 3 — planar 2R with a bent link
+Only `B1` is a design feature — the upper arm is a bent casting. `B2`, `B3` and the
+approach tilt are sub-0.06° assembly asymmetries in the CAD export; they are kept because
+carrying them costs nothing (every link already has a bend term) and it makes the model
+reproduce the URDF exactly instead of approximately.
 
-The upper arm isn't straight. The `(−154.5, 29)` offset gives an effective link with a built-in
-bend that the solution absorbs as a constant:
+The sideways offset deserves a note: the individual joint axes sit 15–34 mm off the arm
+plane, but those offsets **cancel down the chain** to 0.45 mm at the end effector. That is
+what makes the planar decomposition legitimate. Since no planar joint can change it, it is
+a rigid sideways shift of the whole arm and only appears when converting to Cartesian.
 
-```
-L₁ = √(154.5² + 29²) ≈ 157.198        α = atan2(29, −154.5) ≈ 169.37°
-L₂ = 176
-cos c = (r_w² + h_w² − L₁² − L₂²) / (2 L₁ L₂)
-θ_E = α ± arccos(c)          # elbow-up / elbow-down branches
-θ_S = atan2(h_w, r_w) − atan2(L₂ sin c, L₁ + L₂ cos c) − α
-```
+### Forward kinematics
 
-`|cos c| > 1` means the wrist centre is out of reach on this branch.
-
-### Step 4 — the rest falls out
+Each link's absolute angle in the arm plane is just the sum of the joints before it:
 
 ```
-θ_WP = φ − θ_S − θ_E          # wrist pitch just closes the orientation sum
-θ_WR = ψ
+a₁ = θ_S + B₁
+a₂ = θ_S + θ_E + B₂
+a₃ = θ_S + θ_E + θ_WP + B₃
+
+reach  =          L₁cos a₁ + L₂cos a₂ + L₃cos a₃
+height = 83.5115 + L₁sin a₁ + L₂sin a₂ + L₃sin a₃
+pitch  = θ_S + θ_E + θ_WP − 0.0038214
+yaw    = θ_B                    roll = θ_WR
 ```
 
-The trailing `Rz(90°)` in `T_WP→WR` only shifts where roll-zero points; `ik_pose()` strips it off
-when extracting ψ from a pose.
+### Inverse kinematics
 
-### Branches and filtering
+```
+Σ   = pitch + 0.0038214                       # θ_S + θ_E + θ_WP
+w   = (reach, height − 83.5115) − L₃·u(Σ + B₃)   # step back to the wrist pitch centre
+cos c = (|w|² − L₁² − L₂²) / (2 L₁ L₂)        # law of cosines on the remaining 2R
+θ_E = ±c + B₁ − B₂
+θ_S = atan2(w_h, w_r) − atan2(L₂ sin c, L₁ + L₂ cos c) − B₁
+θ_WP = Σ − θ_S − θ_E                          # wrist pitch just closes the sum
+```
 
-Two base branches × two elbow branches gives up to four candidates, filtered through joint
-limits. In practice at most **two** survive — confirmed over 20 000 random configurations.
+`|cos c| > 1` means the wrist centre is outside the annulus the two links can span. The
+two signs of `c` are the elbow-up and elbow-down branches, which is the *only* remaining
+multiplicity — at most **two** solutions, down from four.
 
 ### Two implementation traps
 
-Both were caught in testing and both matter if this is ever ported to firmware:
+Both matter if this is ever ported to firmware:
 
-1. **Don't wrap angles into [−π, π].** The shoulder and elbow limits extend past ±π (−3.375 and
-   +3.451 rad). Naive wrapping silently discards valid solutions. `_fit()` tests the ±2kπ
-   representations against the limits instead.
-2. **Clip the arccos argument.** Near the workspace boundary it drifts a hair past 1.0 from
-   floating point and `arccos` returns NaN.
+1. **Don't wrap angles into [−π, π].** Shoulder and elbow travel past ±π (−3.375 and
+   +3.451 rad), so naive wrapping silently discards valid solutions. `_fit_limits()`
+   shifts each angle by the multiple of 2π nearest the middle of its own limit range
+   instead. Every limit spans less than 2π, so one shift is always enough.
+2. **Guard the arccos argument at both ends.** Near full extension it drifts a hair past
+   1.0 from floating point. A strict `> 1.0` rejection would refuse legitimate
+   full-extension poses, and no rejection at all returns NaN — so the range check carries
+   a 1e-9 tolerance and the argument is then clipped before `arccos` sees it.
 
-### Singularities
+### Verification against the URDF
 
-- **Base axis** (`r ≈ 0`): yaw is undefined. Pick any value, or hold the previous one for
-  continuity. The controller sidesteps this by keeping reach ≥ 60 mm.
-- **Full extension** (`cos c = ±1`): the two elbow branches collapse into one.
-
-### Model accuracy
-
-This solves the model, which sits ~2–3 mm off the URDF, mostly from an ignored 2.2 mm base
-offset. Fine at grasping scale. To recover it, add 2.2 mm as a fixed radial offset in step 1.
-
-### Verification
-
-`python kinematics/ik.py` runs a round trip over 20 000 random in-limit configurations:
+The model is checked against a numeric FK built straight from the URDF, over 5 000 random
+in-limit configurations:
 
 ```
-original joint vector recovered among branches: 20000/20000
-worst FK(IK) position error over ALL branches:  4.36e-13 mm
-worst FK(IK) rotation error over ALL branches:  2.75e-13
-max simultaneous valid solutions: 2
+end effector position error   max 0.0037 mm
+approach axis error           max 0.00068 deg
+roll joint rotation           max 5.9e-15 rad
 ```
+
+For comparison, the previous model — which used rounded link lengths, ignored the 2.2 mm
+base offset and ignored the 0.45 mm sideways offset — was **2.27 mm mean, 3.19 mm max**
+against the same reference. The rewrite is effectively exact.
+
+`python control/kinematics.py` runs the round trip over 20 000 random in-limit configs:
+
+```
+original joint vector among the branches: 20000/20000
+worst task pose error of fk(ik(pose)):    3.98e-13
+worst point error of fk(ik(pose)):        4.02e-13 mm
+most simultaneous solutions:              2
+```
+
+### Workspace
+
+Straight out, the arm reaches `L₁ + L₂ + L₃ = 408.3 mm`. Within joint limits the envelope
+is roughly 408 mm of reach and −231 … +492 mm of height.
+
+Pitch range available with the end effector point held fixed, sampled on a grid:
+
+| reach | height 0 | 100 | 200 | 300 |
+| --- | --- | --- | --- | --- |
+| 120 mm | 67° | 108° | 129° | 129° |
+| 200 mm | 87° | 112° | 129° | 129° |
+| 280 mm | 108° | 125° | 129° | 120° |
+| 350 mm | 125° | 139° | 111° | unreachable |
+
+This is what putting the end effector at the wrist roll tip buys. When the tool tip was
+99 mm further out, holding it fixed forced the wrist centre onto a 174 mm arc that the
+shoulder and elbow had to produce, and from the home pose *no* positive pitch solved at
+all. At 75.5 mm the arc is small enough that pitch is simply a free axis nearly everywhere,
+so the controller can treat it as a pure rotation with no compensation trickery.
 
 ---
 
 ## Part 2 — Control System
 
-### Task space state
-
-The controller holds the commanded pose in **cylindrical** coordinates rather than Cartesian,
-because that is the shape of the operator's mental model — reach out, go up, swing around:
-
-```
-pose = [reach, height, yaw, φ, ψ]
-```
-
-`x = reach·cos(yaw)`, `y = reach·sin(yaw)`, `z = height`. Joystick jogging is therefore always
-relative to the current yaw with no extra bookkeeping: pushing forward extends along whatever
-direction the arm currently faces.
-
-**Reach must stay positive.** A negative radial coordinate flips the base branch and the
-parameterization stops being one-to-one — the round trip fails about 30% of the time and errors
-reach π rad. With reach clamped positive it is exact: 0 failures over 13 383 samples, worst
-joint error 2.02e-12 rad.
-
 ### Input mapping
 
-| Input | Effect | Active when |
-| --- | --- | --- |
-| Joystick Y | Reach — forward/backward along the current yaw | Always (unless arm disabled) |
-| Joystick X | *unbound* | — |
-| Joystick button (**hold**) | Gyroscopic following | While held |
-| Gyro yaw / pitch / roll | Drives yaw / φ / ψ | Only while the joystick button is held |
-| Rotary encoder | Clamp closure | Always, even when the arm is disabled |
-| Encoder button (**press**) | Toggles all arm control | Always |
+| Input | Effect |
+| --- | --- |
+| Joystick X | Height — straight up and down in the root frame |
+| Joystick Y | Reach — along the direction the base plate points |
+| Joystick button (**hold**) | Gyroscopic following |
+| ↳ controller roll | Arm yaw |
+| ↳ controller pitch | Approach pitch |
+| Rotary encoder (**turn**) | Roll about the approach axis |
+| Encoder button (**click**) | Snaps the clamp fully open / fully closed |
+| **Both buttons** | Freeze and return to the startup pose |
 
-Height is currently unbound — no input drives it, so it holds whatever value it was seeded
-with. `HEIGHT_RATE` is still defined, so binding an axis to it is a one-line change in
-`_apply_joystick()`.
+Because the task space is already cylindrical, both stick axes are one-line increments:
 
-### Arm enable toggle
+```python
+pose[HEIGHT] += axis(joy_x) * HEIGHT_RATE * PERIOD
+pose[REACH]  += axis(joy_y) * REACH_RATE  * PERIOD
+```
 
-The encoder button toggles `enabled`. When off, joystick and gyro input are ignored and the last
-joint targets keep being sent, so **the arm stays powered and holds position** — it is not
-limp. The clamp keeps working. Pressing again resumes, and the gyro reference is dropped on
-disable so re-engaging never jumps.
+**Joystick X is absolute**, in the root frame — pure vertical motion regardless of where
+the tool points. **Joystick Y follows the yaw only** — it moves along the base plate's
+heading, and the tool's pitch and roll never steer it. Measured across three start poses
+(yaw 0°/+34°/−46°, pitch +40°/−23°/+69°, roll 0°/+52°/−63°) and both directions, every tick
+is a clean 7.00 mm step with **off-axis motion below 1e-13 mm and zero pitch drift**.
+
+**The joystick is a switch, not a proportional axis.** Past `JOY_THRESHOLD` (800 counts)
+the axis commands full rate; below it, nothing. Short corrections land predictably instead
+of depending on how far the stick was pushed.
+
+### Reachability is the guard
+
+There are no hand-tuned reach or height boxes. Each coordinate is applied **one at a time**
+and kept only if the resulting pose still solves:
+
+```python
+for coordinate in (YAW, ROLL, REACH, HEIGHT, PITCH):
+    trial = list(self.pose)
+    trial[coordinate] = pose[coordinate]
+    solution = self._solve(trial)
+
+    if solution is not None:
+        self.pose, self.target = trial, solution
+```
+
+Per coordinate rather than all-or-nothing, so an unreachable pitch cannot veto the
+translation asked for in the same tick — each axis stops where the workspace ends while the
+others keep moving. Measured: driven to the reach limit, reach pins at 284.3 mm while
+height still moves freely. Because the commanded pose is never allowed to leave the
+reachable set, it also cannot wind up, so no clamping is needed to bound it.
+
+Yaw and roll are clamped directly to their joint limits instead, since each maps to exactly
+one joint and the mapping is exact.
 
 ### Gyroscopic following
 
-While the joystick button is held, controller rotation drives the end effector orientation. With
-5 DOF the yaw of the approach axis is not independent of position — the approach axis must lie in
-the plane through the base axis and the target — so gyro yaw rotates the base, carrying the end
-effector around at constant reach and height. Pitch drives φ and roll drives ψ directly.
+While the joystick button is held, controller **roll** drives the arm's yaw and controller
+**pitch** drives the approach pitch. With 5 DOF the approach axis must lie in the plane the
+base selects, so "yaw" necessarily means rotating the base, carrying the end effector
+around at constant reach and height. Roll about the approach axis stays on the encoder.
 
-Following is **relative, not absolute**. On engage, the current gyro reading *and* the current
-pose orientation are captured as a reference; only the delta from that reference is applied, and
-the reference is dropped the moment the button is released. Three things follow:
+Following is **relative**: on engage, the controller attitude *and* the committed pose are
+captured as a reference, and only the delta is applied. So engaging never jumps, the
+controller can be released and repositioned freely, and gyro drift is shed on every press
+instead of accumulating. Measured: **0.0000 rad jump** on engage, on release, and on
+re-engage after moving the controller 90°+ on two axes; +30° of controller roll gives
++30.000° of yaw, −25° of controller pitch gives −25.000° of pitch, neither touching the
+other.
 
-- Engaging never jumps the arm, whatever attitude the controller is in.
-- You can release, carry the controller to a more comfortable position, and re-engage — the arm
-  holds still throughout and resumes from wherever it was.
-- Long-term gyro drift is shed on every press instead of accumulating.
+The delta is applied **absolutely against the reference** rather than integrated. A pitch
+the arm cannot reach is simply not taken, and is picked up again on the way back, instead
+of winding up an offset while it is being refused.
 
-Absolute mimicry would snap the arm to the controller's attitude on press, which the safety layer
-would reject anyway. Measured: 0.0000 rad jump on engage, 0.0000 rad after releasing, moving the
-controller 90°+ on two axes, and re-engaging.
+Pitch is a **pure rotation** — the end effector point does not move. Measured 5.7e-14 mm of
+translation across a 75° pitch sweep. The old code had to shove reach and height around to
+fake rotation about the wrist centre, and then undo that shove when the pose was rejected;
+with the end effector at the roll tip, none of that is needed.
 
-`GYRO_SIGNS` in `control.py` flips any axis that mirrors the wrong way on hardware.
+### Roll on the encoder
 
-### Clamp with anti-windup
+Encoder counts integrate into roll at `ROLL_PER_COUNT` (0.08 rad ≈ 4.6° per count) and
+clamp at the joint limit. Integrating deltas rather than mapping absolutely is what gives
+the **moving extrema**: once roll saturates, turning back moves it on the very next count
+instead of waiting for the encoder to wind back to wherever it first hit the stop.
+Measured: 10 counts gives +45.84°, spinning far past the stop saturates at exactly the
++83.480° limit, and a single count back drops it to +78.896°.
 
-Encoder motion is integrated as **deltas** into a normalized closure that saturates at [0, 1],
-rather than mapping the absolute encoder count. This is what makes reversal immediate: once the
-clamp bottoms out, turning back moves it on the very next count instead of waiting for the
-encoder to return to wherever it first hit the limit. Verified: saturated at 1.00, one reverse
-step → 0.90.
+Counts are consumed every tick and banked by none, so a tick that ignores input (homing, or
+a stalled joint) discards the motion that happened during it rather than applying it later
+in a lump.
+
+### Clamp
+
+The encoder button snaps the clamp fully open or fully closed. It toggles on **release**
+rather than press, which is what lets the two-button gesture cancel it: pressing both
+buttons in either order starts homing and leaves the clamp untouched. No operator presses
+two buttons on exactly the same 50 ms tick, so a press-triggered clamp would flip on the
+way into every homing gesture. Verified both orders.
+
+### Return to the startup pose
+
+Pressing **both buttons** freezes everything and walks the arm back to the configuration it
+was in at startup, captured once on the first seed so it always means the same place.
+While homing:
+
+- every input is ignored — joystick, gyro, encoder and clamp alike;
+- the commanded pose is not touched, so nothing changes underneath the operator;
+- the gyro reference is dropped and encoder counts are discarded, so nothing that happened
+  during homing leaks out afterwards.
+
+It ends when the *measured* joints are all within `HOME_TOLERANCE` (0.05 rad) of the
+startup pose, at which point the task pose is re-synced from it and control resumes.
+Verified: pose constant for every tick of homing, clamp unchanged, no banked encoder
+motion, and against an arm slewing at 2 rad/s it settles in 9 ticks (0.45 s).
+
+`HOME_TIMEOUT` (10 s) is a deliberate escape hatch rather than part of the gesture: a joint
+that will never arrive would otherwise leave the arm permanently uncommandable. It prints
+when it fires. Homing itself stays available even when a joint is stalled, so it is also
+the way out of a stall.
 
 ### Safety layer
 
-Every proposed pose passes three gates before it becomes a command:
+1. **Rate limit.** Steps are capped at `MAX_JOINT_STEP` (0.25 rad/tick ≈ 5 rad/s at 20 Hz,
+   matching the velocity ceiling sent to the MCU). The whole step vector is **scaled**, not
+   clipped per joint — clipping one joint but not the others changes their ratio and walks
+   the end effector off the commanded path. Measured peak 0.185 rad/tick = 3.71 rad/s.
 
-1. **Reachability, with fallback.** If `ik()` returns no solution, the solve is retried holding
-   the *previous* φ, since pitch is by far the axis most often out of reach (see below). Only if
-   that also fails is the whole pose reverted. Without the fallback, an unreachable pitch would
-   veto the reach and yaw requested in the same tick — position control would go dead whenever
-   you tilted the controller too far.
-2. **Branch continuity.** Among surviving solutions, the one minimizing the largest per-joint
-   change from the current command is chosen, so the arm never flips elbow-up to elbow-down
-   mid-motion.
-3. **Per-joint deviation guard.** Each joint's solution is compared against the *measured* angle
-   from SPI feedback. A joint further than `MAX_JOINT_ERROR` (1.20 rad) is **held**, and the
-   others still move. This matters when a servo loses torque: an all-or-nothing check would let
-   one dead joint freeze the entire arm in bursts, which reads as stuttering on joints that are
-   working fine. Held joints are named on stdout at most every 2 s, so a dead servo is visible.
+2. **Leash to the measured arm.** Each commanded joint is held within `MAX_JOINT_ERROR`
+   (1.20 rad) of its measured angle. A leash cannot latch the way a freeze does: the
+   command tracks alongside the measured angle, so the error closes the moment the joint
+   frees up. While any joint is leashed the task pose is frozen, so it cannot wander off
+   from the hardware and drag the other four joints toward a pose that will never happen.
+   Leashed joints are named on stdout at most every 2 s.
 
-Surviving steps are clamped to `MAX_JOINT_STEP` (0.25 rad/tick ≈ 5 rad/s, matching the velocity
-ceiling sent to the MCU), and the result is clamped to the firmware joint limits as a backstop.
+   Measured against a dead base servo: the command holds at exactly 1.20 rad away, the task
+   pose drifts 0.00, and both recover on their own once the joint is freed.
 
-### Pitch rotates about the wrist, not the tool tip
+3. **Joint limit clamp** as a backstop. 0 violations over 4 000 randomized ticks.
 
-Pitch needs a choice that the task space alone does not settle: when φ changes, *what stays
-fixed?* The two options behave completely differently.
+On headroom: a 5 rad/s arm tracks with 0.000 rad of error. Driven adversarially — full
+random stick and gyro input every single tick — a 2 rad/s arm peaks at 1.100 rad and a
+1 rad/s arm at 1.150 rad, so the leash does engage briefly under abuse on a slow or heavily
+loaded arm. That is the mechanism working as intended, not a fault, but if a loaded arm
+nuisance-trips it on the bench, lower `MAX_JOINT_STEP` to match what the servos can
+actually deliver rather than raising `MAX_JOINT_ERROR`.
 
-Holding the **tool tip** fixed forces the wrist centre to sweep a 174 mm arc around it, which the
-shoulder and elbow have to produce. Wrist pitch ends up contributing almost nothing until the big
-joints hit their limits, and much of the range is simply unreachable — from the home pose, *no*
-positive pitch solved at all, because the wrist centre sits only 21.5 mm off the base axis and
-pitching up walked it behind the base.
-
-Holding the **wrist centre** fixed is the natural choice. Step 3 of the IK derives θ_S and θ_E
-from `(r_w, h_w)` alone, so freezing the wrist centre leaves both untouched and `θ_WP = φ − θ_S −
-θ_E` absorbs the entire change. Pitch becomes a pure wrist-pitch motion.
-
-`_apply_gyro()` implements this by compensating the tool-tip position whenever φ moves:
-
-```python
-pose[0] += L3 * (cos φ_new − cos φ_old)      # reach
-pose[1] += L3 * (sin φ_new − sin φ_old)      # height
-```
-
-Measured effect — a 40° controller pitch from the home pose:
-
-```
-base +0.00   shoulder +0.00   elbow +0.00   wristP +40.00   wristR +0.00  (degrees)
-```
-
-Reachable pitch from home widens from "nothing above 0°" to roughly **−90° … +79°**, which is
-essentially the wrist pitch joint's own limit (±1.534 rad). The tool tip now swings on a 174 mm
-arc as you pitch, which is what a wrist does.
-
-Joint velocity sent to the MCU is a constant `JOINT_VEL = 5.0` rad/s. It is a slew *ceiling*, not
-a speed setting — actual speed comes from how fast the targets move. Sending a velocity at or
-below the demanded rate starves the MCU's rate limiter and causes windup.
+Joint velocity sent to the MCU is a constant `JOINT_VEL = 5.0` rad/s. It is a slew
+*ceiling*, not a speed setting — actual speed comes from how fast the targets move. Sending
+a velocity at or below the demanded rate starves the MCU's rate limiter and causes windup.
 
 ### Data flow
 
@@ -276,9 +335,9 @@ SEC controller (BLE)
               ← feedback: measured joints, status, per-joint fault bytes
 ```
 
-Feedback returns on the same SPI transaction that carries the command. `main.py` seeds the task
-pose from measured joints at startup, so the first command never jumps, and re-seeds if the SPI
-service drops out.
+Feedback returns on the same SPI transaction that carries the command. `main.py` seeds the
+task pose from measured joints at startup, so the first command never jumps, and re-seeds
+if the SPI service drops out. Re-seeding does **not** move the homing target.
 
 ### Tuning constants
 
@@ -286,35 +345,42 @@ All in [`control.py`](control.py):
 
 | Constant | Default | Meaning |
 | --- | --- | --- |
-| `REACH_RATE` | 140 mm/s | Jog speed at full deflection |
-| `HEIGHT_RATE` | 140 mm/s | Unused until an axis is bound to height |
-| `REACH_RANGE` | (60, 480) mm | Radial guard; low end avoids the base singularity |
-| `HEIGHT_RANGE` | (−250, 550) mm | Vertical guard |
-| `GYRO_SIGNS` | (1, 1, 1) | Per-axis flip for yaw/pitch/roll |
-| `ENC_COUNTS_FULL` | 30 | Encoder counts from open to closed |
+| `JOY_THRESHOLD` | 800 counts | Stick travel before an axis engages; no ramp above it |
+| `REACH_RATE` | 140 mm/s | Jog speed along the base heading |
+| `HEIGHT_RATE` | 140 mm/s | Jog speed, vertical |
+| `ROLL_PER_COUNT` | 0.08 rad | Approach roll per encoder count |
+| `JOY_SIGNS` | (1, 1) | Per-axis flip for joystick X / Y |
+| `GYRO_SIGNS` | (1, 1) | Per-axis flip for controller roll / pitch |
 | `MAX_JOINT_STEP` | 0.25 rad | Per-tick rate limit (≈ 5 rad/s at 20 Hz) |
-| `MAX_JOINT_ERROR` | 1.20 rad | Per-joint hold threshold vs measured |
-| `JOY_DEADZONE` | 0.05 | Normalized joystick deadzone |
+| `MAX_JOINT_ERROR` | 1.20 rad | Leash distance from the measured arm |
+| `HOME_TOLERANCE` | 0.05 rad | Per-joint error that counts as settled at home |
+| `HOME_TIMEOUT` | 10 s | Escape hatch if a joint never arrives |
 
 ### Control verification
 
-Simulated against a perfect-tracking arm, 4 000 randomized ticks plus targeted cases:
+47 behavioural checks against a simulated arm, all passing:
 
 ```
-reach jog out and back      195.5 -> 335.5 -> 195.5 mm   (height held)
-joy_y drives reach          195.5 -> 263.9 mm;  joy_x moves nothing
-FK of commanded joints      matches commanded pose to 0.01 mm
-clamp anti-windup           1.00 saturated, 0.90 after one reverse step
-disabled                    joints frozen, pose frozen, clamp still live
-gyro engage                 0.0000 rad jump; +10 deg yaw -> base joint +10.0 deg
-gyro release / re-engage    0.0000 rad jump after moving the controller 90 deg+ away
-pitch drives the wrist      40 deg pitch -> wristP +40.00 deg, all other joints +0.00
-pitch range from home       -90 .. +79 deg (was: no positive pitch reachable)
-step limiting               max observed step 0.217 rad -> 4.3 rad/s
-unreachable pitch           reach and yaw still applied (195.5 -> 332.2 mm, yaw 25 deg)
-limp shoulder simulated     wrist roll still tracks 60 deg, monotonic, no stutter
-joint limit violations      0 / 3000 randomized ticks
+joystick X, 3 poses x 2 directions   7.00 mm/tick vertical, off-axis < 1e-13 mm, 0 pitch drift
+joystick Y, 3 poses x 2 directions   7.00 mm/tick along heading, off-heading < 1e-13 mm
+joystick threshold                   799 -> 0.0, 801 -> 1.0, -900 -> -1.0  (no ramp)
+encoder click                        clamp byte toggles 0 / 255 on each click
+encoder turn                         10 counts -> +45.84 deg
+roll extrema                         saturates at +83.480 deg, one count back -> +78.896
+gyro engage / release / re-engage    0.0000 rad jump in all three
+gyro roll -> yaw                     +30 deg controller -> +30.000 deg arm, pitch untouched
+gyro pitch -> pitch                  -25 deg controller -> -25.000 deg arm, yaw untouched
+gyro pitch is a pure rotation        point moves 5.7e-14 mm over a 75 deg sweep
+both buttons                         homes, re-syncs, clamp untouched, pose constant throughout
+press order                          neither order flips the clamp
+homing vs a 2 rad/s arm              settles in 9 ticks (0.45 s)
+workspace edge                       reach pins at 284.3 mm, height still free
+stalled joint                        command holds at exactly 1.20 rad, pose drift 0.00
+stall recovery                       recovers unaided, control resumes
+rate limiting                        peak 0.185 rad/tick = 3.71 rad/s
+fk(target) vs commanded pose         agrees to 1.1e-13
+joint limit violations               0 / 4000 randomized ticks
 ```
 
-Hardware behaviour is unverified — the gyro axis signs and `ENC_COUNTS_FULL` in particular are
-best confirmed on the bench.
+Hardware behaviour is unverified — `JOY_SIGNS`, `GYRO_SIGNS` and `ROLL_PER_COUNT` in
+particular are best confirmed on the bench.
