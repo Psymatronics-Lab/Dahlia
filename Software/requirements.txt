@@ -1,1 +1,4 @@
+setuptools
+wheel
 lerobot[all]
+opencv-python
