@@ -4,6 +4,9 @@ services:
     user: root
     devices:
       - /dev/spidev0.0
+    # published on the board instead of only compose so other services can communicate
+    ports:
+      - "9000:9000"
     volumes:
       - .:/spi_service
     command: >

@@ -181,8 +181,14 @@ public:
      * @param id       Array of servo IDs to read.
      * @param id_num   Number of IDs.
      * @param data     Destination, laid out as id_num * byte_num bytes.
+     * @param ok_mask  Optional out: bit i is set if id[i] answered. Slots whose bit
+     *                 is clear are left untouched, so the caller can keep its last
+     *                 good value for a servo that dropped out.
+     * @note Each reply is filed by the ID it carries, not by arrival order, so a
+     *       silent servo leaves a gap instead of shifting later replies into its slot.
      */
-    ServoStatus_t sync_read(uint8_t addr, uint8_t byte_num, uint8_t *id, uint8_t id_num, uint8_t *data);
+    ServoStatus_t sync_read(uint8_t addr, uint8_t byte_num, uint8_t *id, uint8_t id_num,
+                            uint8_t *data, uint8_t *ok_mask = nullptr);
 
     /** @brief Enable torque output (servo holds position / is powered). */
     ServoStatus_t enable_torque(uint8_t id);
@@ -261,11 +267,23 @@ public:
 
     /**
      * @brief Synchronously read telemetry from several servos.
-     * @param id     Array of servo IDs.
-     * @param id_num Number of IDs.
-     * @param data   Output rows, each {position, speed, load, voltage, temp}.
+     * @param id      Array of servo IDs.
+     * @param id_num  Number of IDs.
+     * @param data    Output rows, each {position, speed, load, voltage, temp}.
+     * @param ok_mask Optional out: bit i is set if id[i] answered. Rows whose bit is
+     *                clear are left untouched.
      */
-    ServoStatus_t sync_read_cur_pos_ex(uint8_t *id, uint8_t id_num, int16_t (*data)[5]);
+    ServoStatus_t sync_read_cur_pos_ex(uint8_t *id, uint8_t id_num, int16_t (*data)[5],
+                                       uint8_t *ok_mask = nullptr);
+
+    /**
+     * @brief Discard any bytes still waiting on the bus.
+     *
+     * A transaction that timed out part way through can leave late replies in the
+     * UART buffer. Those bytes would be parsed as the head of the next reply, so
+     * clear them before starting a fresh transaction.
+     */
+    void flush_rx();
 
     /** @brief Read the stored position offset into @p offset. */
     ServoStatus_t read_pos_offset(uint8_t id, int16_t *offset);

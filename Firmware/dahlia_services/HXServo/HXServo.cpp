@@ -359,39 +359,82 @@ ServoStatus_t HXServo::sync_write(uint8_t addr, uint8_t *data, uint8_t data_len,
     return status;   /* sync write is broadcast: no reply expected */
 }
 
-ServoStatus_t HXServo::sync_read(uint8_t addr, uint8_t byte_num, uint8_t *id, uint8_t id_num, uint8_t *data)
+ServoStatus_t HXServo::sync_read(uint8_t addr, uint8_t byte_num, uint8_t *id, uint8_t id_num,
+                                 uint8_t *data, uint8_t *ok_mask)
 {
     ServoStatus_t status;
-    const uint8_t total_size = 1 + byte_num + id_num;
+    const uint8_t total_size = 2 + id_num;
     uint8_t buf[total_size];
+    uint8_t answered = 0;
 
     buf[0] = addr;
     buf[1] = byte_num;
     status.id = BROADCAST_ID;
     status.error_byte = 0;
-    rx_skip = 0;
-    rx_frame_length = 6 + byte_num;
 
     for (uint8_t i = 0; i < id_num; i++) {
         buf[2 + i] = id[i];
     }
 
+    /* Late replies from a previous transaction would be parsed as the head of the
+     * first reply here, so start from a known-empty bus. */
+    flush_rx();
+
+    rx_skip = 0;
+    rx_frame_length = 6 + byte_num;
+
     if (!tx_frame_write(BROADCAST_ID, CMD_SYNC_READ, buf, sizeof(buf))) {
         status.error_bits.bit_tx = 1;
+        if (ok_mask) {
+            *ok_mask = 0;
+        }
         return status;
     }
 
-    /* Each addressed servo replies in turn. */
+    /* Each addressed servo replies in turn. File every frame by the ID it carries
+     * rather than by arrival order: a servo that never answers must leave a gap,
+     * not shift the servos behind it into its slot. */
     for (uint8_t i = 0; i < id_num; i++) {
-        status = ack();
-        if (status.error_bits.bit_rx) {
-            return status;
+        ServoStatus_t reply = ack();
+
+        if (reply.error_bits.bit_rx) {
+            status.error_bits.bit_rx = 1;
+            break;   /* the timeout has already elapsed; the rest are not coming */
         }
-        for (uint8_t j = 0; j < byte_num; j++) {
-            data[i * byte_num + j] = rx_packet.elements.args[j];
+
+        /* A reply frame carries the servo's error flags where a command carries the
+         * instruction byte. Keep them, but not in the two driver-owned bits. */
+        status.error_byte |= reply.error_byte & 0x3F;
+
+        for (uint8_t slot = 0; slot < id_num; slot++) {
+            if (id[slot] != reply.id || (answered & (1u << slot))) {
+                continue;
+            }
+            for (uint8_t j = 0; j < byte_num; j++) {
+                data[slot * byte_num + j] = rx_packet.elements.args[j];
+            }
+            answered |= (1u << slot);
+            break;
         }
     }
+
+    if (answered != (uint8_t)((1u << id_num) - 1)) {
+        status.error_bits.bit_rx = 1;
+        flush_rx();   /* a straggler must not corrupt the next transaction */
+    }
+
+    if (ok_mask) {
+        *ok_mask = answered;
+    }
     return status;
+}
+
+void HXServo::flush_rx()
+{
+    while (uart->available()) {
+        uart->read();
+    }
+    rx_status = PACKET_HEADER_1;
 }
 
 /* -------------------------------------------------------------------------
@@ -553,32 +596,41 @@ ServoStatus_t HXServo::sync_write_pos_ex(int16_t (*data)[4], uint8_t id_num)
     return sync_write(REG_ACC, buf, sizeof(buf), 7);
 }
 
-ServoStatus_t HXServo::sync_read_cur_pos_ex(uint8_t *id, uint8_t id_num, int16_t (*data)[5])
+ServoStatus_t HXServo::sync_read_cur_pos_ex(uint8_t *id, uint8_t id_num, int16_t (*data)[5],
+                                            uint8_t *ok_mask)
 {
     ServoStatus_t status;
-    const uint8_t byte_len = 8;
-    const uint8_t buf_size = id_num;
-    const uint8_t read_buf_size = byte_len * id_num;
-    uint8_t  read_data[read_buf_size];
-    uint16_t u16_pos[buf_size];
-    uint16_t u16_speed[buf_size];
-    uint16_t u16_load[buf_size];
+    const uint8_t byte_len = 8;   /* 56..63: position, speed, load, voltage, temperature */
+    uint8_t read_data[byte_len * id_num];
+    uint8_t answered = 0;
 
-    status = sync_read(REG_PRESENT_POSITION_L, byte_len, id, id_num, read_data);
-    if (status.error_bits.bit_tx || status.error_bits.bit_rx) {
+    status = sync_read(REG_PRESENT_POSITION_L, byte_len, id, id_num, read_data, &answered);
+
+    if (ok_mask) {
+        *ok_mask = answered;
+    }
+
+    if (status.error_bits.bit_tx) {
         return status;
     }
 
+    /* Decode only the servos that actually answered. The rest of read_data is
+     * untouched, so writing it out would hand the caller stack garbage. */
     for (uint8_t i = 0; i < id_num; i++) {
-        u16_pos[i]   = bytes2word(&read_data[i * byte_len],       &read_data[(i * byte_len) + 1]);
-        u16_speed[i] = bytes2word(&read_data[(i * byte_len) + 2], &read_data[(i * byte_len) + 3]);
-        u16_load[i]  = bytes2word(&read_data[(i * byte_len) + 4], &read_data[(i * byte_len) + 5]);
+        if (!(answered & (1u << i))) {
+            continue;
+        }
 
-        data[i][0] = (int16_t)MASK_SERVO(u16_pos[i], 15);
-        data[i][1] = (int16_t)MASK_SERVO(u16_speed[i], 15);
-        data[i][2] = (int16_t)MASK_SERVO(u16_load[i], 10);
-        data[i][3] = (int16_t)read_data[(i * byte_len) + 6];   /* voltage     */
-        data[i][4] = (int16_t)read_data[(i * byte_len) + 7];   /* temperature */
+        const uint8_t o = i * byte_len;
+        uint16_t u16_pos   = bytes2word(&read_data[o],     &read_data[o + 1]);
+        uint16_t u16_speed = bytes2word(&read_data[o + 2], &read_data[o + 3]);
+        uint16_t u16_load  = bytes2word(&read_data[o + 4], &read_data[o + 5]);
+
+        data[i][0] = (int16_t)MASK_SERVO(u16_pos, 15);
+        data[i][1] = (int16_t)MASK_SERVO(u16_speed, 15);
+        data[i][2] = (int16_t)MASK_SERVO(u16_load, 10);
+        data[i][3] = (int16_t)read_data[o + 6];   /* voltage     */
+        data[i][4] = (int16_t)read_data[o + 7];   /* temperature */
     }
     return status;
 }

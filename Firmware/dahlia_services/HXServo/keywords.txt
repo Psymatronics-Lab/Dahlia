@@ -44,6 +44,7 @@ read_voltage	KEYWORD2
 read_current	KEYWORD2
 read_load	KEYWORD2
 read_moving_status	KEYWORD2
+flush_rx	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)

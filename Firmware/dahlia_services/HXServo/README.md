@@ -268,7 +268,8 @@ Discovery & raw register access:
 | `reg_write(id, addr, *data, len)` | Buffered write; applied by `reg_action()`. |
 | `reg_action(id)` | Execute a buffered `reg_write` (broadcast to sync many servos). |
 | `sync_write(addr, *data, len, param_len)` | Write a register block to many servos in one frame. |
-| `sync_read(addr, byte_num, *ids, id_num, *data)` | Read a register block from many servos. |
+| `sync_read(addr, byte_num, *ids, id_num, *data, *ok_mask = nullptr)` | Read a register block from many servos. `ok_mask` bit *i* reports whether `ids[i]` answered. |
+| `flush_rx()` | Discard bytes left on the bus by a timed-out transaction. |
 
 State & mode:
 
@@ -426,7 +427,23 @@ following deliberate changes:
    of.)*
 5. **English documentation.** All in-code comments are rewritten in English, plus
    this README.
-6. **Minor cleanups.** Removed a dead `#else` branch that referenced a nonexistent
+6. **Fixed `sync_read` (and therefore `sync_read_cur_pos_ex`).** Two defects made the
+   original unusable, which is why callers had to fall back to one `general_read` per
+   servo:
+   - The request buffer was sized `1 + byte_num + id_num` but only `2 + id_num` bytes
+     were ever filled, and `sizeof(buf)` was passed as the payload length. Every
+     sync-read frame therefore carried uninitialised trailing bytes, which the servos
+     parsed as **additional IDs to read** — producing phantom replies that desynchronised
+     the bus.
+   - Replies were stored by loop index, assuming they arrived in the order the IDs were
+     listed. One silent servo shifted every later reply into the wrong slot, so a joint
+     would silently report its neighbour's position. Replies are now filed by the ID
+     they carry, a missing servo leaves a gap, and the optional `ok_mask` says which
+     slots are valid.
+
+   Both functions also flush the bus before and after a partial transaction so a late
+   reply cannot corrupt the next one.
+7. **Minor cleanups.** Removed a dead `#else` branch that referenced a nonexistent
    variable; error paths now clear outputs to `0` instead of assigning `NULL` to
    integer pointers; fixed the `read_temperture` → `read_temperature` typo; the
    debug flag is now `HX_DEBUG` (default **off**) and prints to a configurable

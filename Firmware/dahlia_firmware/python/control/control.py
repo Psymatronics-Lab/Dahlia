@@ -1,4 +1,4 @@
-"""Task space teleoperation for the Dahlia arm.
+"""Task space teleoperation for the Dahlia arm using the SEC.
 
 The commanded state is an end effector pose in the arm's own cylindrical task space
 (see kinematics.py), which is what makes the operator mapping fall out one to one:
@@ -42,7 +42,7 @@ ROLL_PER_COUNT = 0.08   # Radians of approach roll per encoder count
 # Applied to (joystick X, joystick Y) and to (controller roll, controller pitch).
 # Flip a sign here if the arm mirrors the controller on that axis.
 JOY_SIGNS = (1.0, 1.0)
-GYRO_SIGNS = (1.0, 1.0)
+GYRO_SIGNS = (-1.0, 1.0)
 
 MAX_JOINT_STEP = 0.25   # Radians per tick, about 5 rad/s at 20 Hz
 MAX_JOINT_ERROR = 1.20   # Radians from the measured arm, beyond this the command waits
