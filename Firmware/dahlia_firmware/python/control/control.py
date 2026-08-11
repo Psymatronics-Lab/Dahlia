@@ -1,17 +1,14 @@
-"""Task space teleoperation for the Dahlia arm using the SEC.
+"""Teleoperation for the Dahlia arm using the SEC.
 
-The commanded state is an end effector pose in the arm's own cylindrical task space
-(see kinematics.py), which is what makes the operator mapping fall out one to one:
-
-    joystick X      height, straight up and down in the root frame
-    joystick Y      reach, along whatever direction the base plate points, and
-                    nothing else -- the tool's pitch and roll never steer it
-    joystick button gyroscopic following while held: controller roll drives the
-                    arm's yaw, controller pitch drives the approach pitch
-    encoder turn    roll about the approach axis
-    encoder click   snaps the clamp fully open or fully closed
-    both buttons    freeze and return to the pose the arm started in, ignoring
-                    every input until it settles there
+The commanded state is an end effector in the arm's cylindrical task space.
+    joystick X          height, straight up and down in the root frame
+    joystick Y          reach, along whatever direction the base plate points
+    joystick button     gyroscopic following while held: controller roll drives the
+                        arm's yaw, controller pitch drives the approach pitch
+    encoder turn        roll about the approach axis
+    encoder button      snaps the clamp fully open or fully closed
+    both buttons        freeze and return to the pose the arm started in, ignoring
+                        every input until it settles there
 
 Each coordinate is taken only if the arm can actually reach the result, so a pose
 that cannot be solved is never commanded and the operator simply stops at the edge
@@ -26,21 +23,16 @@ from control.kinematics import JOINT_LIMITS, NUM_JOINTS, fk_task, ik
 
 PERIOD = 0.05   # Control period in seconds
 
-# Task pose layout, matching kinematics.fk_task
-REACH, HEIGHT, YAW, PITCH, ROLL = range(5)
+REACH, HEIGHT, YAW, PITCH, ROLL = range(5)   # Task pose layout, matching kinematics.fk_task
 
-# Counts, below this an axis does nothing. Past it the axis commands full rate:
-# the stick is a switch, not a proportional input, so short corrections land the
-# same way every time instead of depending on how far it was pushed.
-JOY_THRESHOLD = 800.0
+JOY_THRESHOLD = 800.0   # Joystick reading deadzone, no proportional input
 
 REACH_RATE = 140.0   # Millimetres per second, along the base plate's heading
 HEIGHT_RATE = 140.0   # Millimetres per second, vertically in the root frame
 
 ROLL_PER_COUNT = 0.08   # Radians of approach roll per encoder count
 
-# Applied to (joystick X, joystick Y) and to (controller roll, controller pitch).
-# Flip a sign here if the arm mirrors the controller on that axis.
+# Orientations for (joystick X, joystick Y) and (controller roll, controller pitch)
 JOY_SIGNS = (1.0, 1.0)
 GYRO_SIGNS = (-1.0, 1.0)
 
@@ -62,7 +54,7 @@ def clamp(value, low, high):
 
 
 def axis(counts):
-    """Joystick as an on/off switch: full rate past the threshold, nothing below it."""
+    """Joystick is an thresholded switch, no proportional output."""
     if abs(counts) < JOY_THRESHOLD:
         return 0.0
 
@@ -105,8 +97,7 @@ class ArmController:
         measured = np.array(feedback["positions"], dtype=float)
 
         if self.start is None:
-            # Captured once, not on later re-seeds, so homing always means the same place
-            self.start = measured.copy()
+            self.start = measured.copy()   # Copy initial pose once
 
         self._adopt(measured)
         self.ready = True
@@ -116,8 +107,6 @@ class ArmController:
         """Fold one controller sample into the command. Returns the joint targets."""
         self._read_buttons(state)
 
-        # Consumed every tick, banked by none: a tick that ignores input discards
-        # the motion that happened during it rather than applying it later in a lump.
         turn = self._encoder_delta(state)
 
         if self.homing or self.stalled:
@@ -138,7 +127,7 @@ class ArmController:
         """Clamp closure as the byte the firmware expects, 0 open to 255 closed."""
         return int(round(self.closure * 255))
 
-    # --- input -------------------------------------------------------------
+    # ----- input -----
 
     def _read_buttons(self, state):
         """Encoder click works the clamp; both buttons together start homing.
@@ -198,11 +187,7 @@ class ArmController:
         reading = np.radians([state["imu_roll"], state["imu_pitch"]]) * GYRO_SIGNS
 
         if self.gyro_ref is None:
-            # Reference the controller against the pose already committed, not the
-            # one proposed this tick, so a rejected proposal cannot bias the frame.
-            # Following is relative, so the arm never snaps to the controller's
-            # attitude, the controller can be released and repositioned freely, and
-            # drift is shed on every press instead of accumulating across a session.
+            # Reference controller against already committed pose as following is relative
             self.gyro_ref = (reading, np.array([self.pose[YAW], self.pose[PITCH]]))
 
         engaged, held = self.gyro_ref
@@ -214,7 +199,7 @@ class ArmController:
         pose[YAW] = clamp(float(yaw), *JOINT_LIMITS[0])
         pose[PITCH] = float(pitch)
 
-    # --- solving -----------------------------------------------------------
+    # ----- solving -----
 
     def _commit(self, pose):
         """Take each coordinate that leaves the pose solvable and drop the rest.
@@ -254,18 +239,14 @@ class ArmController:
         overshoot = np.max(np.abs(step)) / MAX_JOINT_STEP
 
         if overshoot > 1.0:
-            # Scale the whole vector rather than clipping each joint. Clipping one
-            # joint but not the others changes their ratio, which walks the end
-            # effector off the path the pose asked for.
+            # Scale the whole vector rather than clipping each joint
             step /= overshoot
 
         joints = self.joints + step
         self.stalled = False
 
         if feedback["ok"]:
-            # Leash the command to the measured arm rather than freezing it. A joint
-            # that cannot move keeps its command alongside it, so the error closes the
-            # moment it frees up. Freezing latches: the held joint never catches up.
+            # Leash the command to the measured arm rather than freezing it
             measured = np.array(feedback["positions"], dtype=float)
             leashed = np.clip(joints, measured - MAX_JOINT_ERROR, measured + MAX_JOINT_ERROR)
             stuck = np.abs(leashed - joints) > 1e-9
@@ -276,7 +257,7 @@ class ArmController:
 
         self.joints = np.clip(joints, LOW, HIGH)
 
-    # --- homing ------------------------------------------------------------
+    # ----- homing -----
 
     def _start_homing(self):
         if self.homing:
@@ -302,8 +283,7 @@ class ArmController:
 
         return bool(np.max(np.abs(measured - self.start)) <= HOME_TOLERANCE)
 
-    # --- helpers -----------------------------------------------------------
-
+    # ----- helpers -----
     def _adopt(self, joints):
         """Take a joint vector as both the command and the task state."""
         self.joints = np.array(joints, dtype=float)
