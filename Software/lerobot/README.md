@@ -29,10 +29,7 @@ pip install -e Software/lerobot          # add [camera] for the OpenCV backend
 `--robot.type=dahlia` resolves through a registry that the `@register_subclass` decorators fill at import time, so something has to import `lerobot_dahlia` before the CLI parses arguments. LeRobot's plugin discovery flag does that:
 
 ```bash
-lerobot-teleoperate \
-  --robot.type=dahlia --robot.port=http://dahlia.local:9000 \
-  --teleop.type=dahlia_sec --teleop.port=http://dahlia.local:9000 \
-  --robot.discover_packages_path=lerobot_dahlia
+uv run lerobot-teleoperate --robot.type=dahlia --robot.port=http://dahlia.local:9000 --teleop.type=dahlia_sec --teleop.port=http://dahlia.local:9000 --robot.discover_packages_path=lerobot_dahlia
 ```
 
 Confirm your version has it with `lerobot-record --help | grep discover`. If it does not, importing the package before the CLI runs has the same effect — the registration is a plain import side effect, nothing LeRobot-version specific.
@@ -68,6 +65,25 @@ Re-deriving the action here instead, from the raw BLE samples, would look simple
 Reading the *command* rather than the measured pose matters too: the measurement lags the command and settles onto it, so recording it as the action would teach a policy to output the state it is already in.
 
 When nothing is driving the arm in radians, `get_action()` holds its previous action instead of jumping.
+
+## Who owns the arm
+
+The SPI service keeps **one** command struct with **one** mode field, and its two POST routes overwrite each other's: `/targets` sets `MODE_ANGLE` and commands radians, `/motors` sets `MODE_RAW` and commands ticks. Whichever posted last wins, and the MCU re-reads the mode every servo cycle.
+
+LeRobot's loops call `robot.send_action()` every tick regardless of what else is driving. With `python/main.py` running that makes two writers, the mode flips at the rate the two of them post, and the arm jerks around the commanded pose as the MCU alternates between the two command spaces. The teleoperator's own `MODE_ANGLE` guard then trips on the robot's write from the previous tick and starts holding stale actions, which makes it worse.
+
+Ownership cannot be detected, so it is declared. `python/main.py` is the App Lab application and runs continuously; there is also no liveness signal to read even if it did not, because the service resends the command struct at 100 Hz whether or not anything is updating it. The MCU therefore stays `fresh` as long as the brick runs, and the mode keeps whatever was last posted — a single POST to `/targets` leaves the mode reading `MODE_ANGLE` indefinitely, even if the sender has stopped.
+
+So `DahliaRobotConfig.read_only` decides it, defaulting to observing:
+
+| Task | `read_only` | Behaviour |
+|---|---|---|
+| `lerobot-teleoperate`, `lerobot-record` | `true` (default) | Returns the action for the dataset, sends nothing. The SEC drives. |
+| `lerobot-replay`, policy evaluation | `--robot.read_only=false` | Commands the arm. |
+
+The default is the safe direction: forgetting the flag on a replay leaves the arm still and logs why, while forgetting it the other way corrupts a recording and fights a live teleoperator.
+
+Driving also needs the SEC path to actually stand down, which does not require stopping the App Lab application — `main.py` only posts `/targets` while the controller is connected, so disconnecting the SEC is enough. If you drive while the command space is still set to radians, `send_action()` warns once rather than fighting quietly.
 
 ## Bring-up
 Check the bus on its own, without LeRobot:

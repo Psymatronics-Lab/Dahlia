@@ -41,7 +41,7 @@ import requests
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.teleoperators.teleoperator import Teleoperator
 
-from .dahlia_bus import GRIPPER_NAME, JOINT_NAMES
+from .dahlia_bus import GRIPPER_NAME, JOINT_NAMES, MODE_ANGLE
 from .dahlia_calibration import (
     JOINT_ANGLE_LIMITS,
     angle_to_normalized,
@@ -49,10 +49,6 @@ from .dahlia_calibration import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Mirrors ControlMode in sketch/src/spi/spi_service.h. The on-board SEC loop commands
-# in radians, so only MODE_ANGLE means "the SEC is driving".
-MODE_ANGLE = 1
 
 
 @TeleoperatorConfig.register_subclass("dahlia_sec")

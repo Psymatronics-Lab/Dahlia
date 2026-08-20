@@ -137,6 +137,12 @@ _WRITABLE = {
 }
 
 
+# Mirrors ControlMode in sketch/src/spi/spi_service.h. The service keeps one command
+# struct with one mode field, and /targets and /motors each overwrite the other's, so
+# the mode also says which client currently owns the arm.
+MODE_HOLD, MODE_ANGLE, MODE_RAW = 0, 1, 2
+
+
 # As built: the shoulder carries the whole arm and gets the high torque servo, the
 # rest are HX-30HM. Resolution is 4096 across the family, so this only affects
 # reporting and the control table lookup, not any of the maths.
@@ -297,6 +303,9 @@ class HXServoMotorsBus(MotorsBusBase):
         self._goal_acceleration: dict[str, int] = dict.fromkeys(self.motors, self.default_acceleration)
         self._torque: dict[str, bool] = dict.fromkeys(self.motors, False)
 
+        # Set from every state the service returns; None until the first one arrives.
+        self._effective_mode: int | None = None
+
         self._validate_motors()
 
     def __len__(self) -> int:
@@ -445,6 +454,11 @@ class HXServoMotorsBus(MotorsBusBase):
                 f"The SPI service has no valid frame from the MCU: {payload.get('error')}"
             )
 
+        # The mode the MCU is acting on. It only reads MODE_HOLD if the service itself
+        # stops clocking frames, not if a client stops posting, so this tracks which
+        # command space is selected rather than whether anyone is still driving it.
+        self._effective_mode = payload.get("mode")
+
         if payload.get("stale"):
             # The MCU has fallen back to holding its pose because commands stopped
             # arriving in time. Reads are still valid, so warn rather than raise.
@@ -458,6 +472,21 @@ class HXServoMotorsBus(MotorsBusBase):
             logger.warning(f"The MCU missed telemetry from: {offline}")
 
         return payload
+
+    def commanding_in_radians(self) -> bool:
+        """Whether the command space is currently set to radians, i.e. /targets last wrote it.
+
+        Useful as a conflict check, not as a liveness check. The service resends the
+        command struct at 100 Hz whether or not anything is updating it, so the MCU
+        stays "fresh" as long as the brick runs and the mode keeps whatever was last
+        posted. A single POST to /targets therefore leaves this true indefinitely,
+        even if the loop that sent it has since stopped. It says the SEC path was the
+        last writer, never that it is still running.
+
+        Answered from the last state the service returned, which every read and every
+        write already carries, so asking costs no extra request.
+        """
+        return self._effective_mode == MODE_ANGLE
 
     def _raw_from_state(self, state: dict, motor: str, data_name: str) -> int:
         """Pull one motor's raw value for a register out of a state response."""

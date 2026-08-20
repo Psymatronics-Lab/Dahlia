@@ -4,3 +4,4 @@ dahlia_hardware/
 sec_hardware/
 **.pyc
 climb.csv
+**.egg-info
