@@ -36,7 +36,7 @@ ROLL_PER_COUNT = 0.08   # Radians of approach roll per encoder count
 JOY_SIGNS = (1.0, 1.0)
 GYRO_SIGNS = (-1.0, 1.0)
 
-MAX_JOINT_STEP = 0.25   # Radians per tick, about 5 rad/s at 20 Hz
+MAX_JOINT_STEP = 0.2608   # Radians per tick, 5.2155 rad/s at 20 Hz, the servo maximum
 MAX_JOINT_ERROR = 1.20   # Radians from the measured arm, beyond this the command waits
 
 HOME_TOLERANCE = 0.05   # Radians per joint that still counts as settled at home

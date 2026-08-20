@@ -249,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
         routes = {
             "/feedback": self.get_feedback,
             "/motors": self.get_motors,
+            "/command": self.get_command,
             "/config": self.get_config,
             "/health": self.get_health,
         }
@@ -373,6 +374,22 @@ class Handler(BaseHTTPRequestHandler):
         payload = dict(payload)
         payload["age"] = time.monotonic() - payload["ts"]
         return payload
+
+    # ----- command readback -----
+
+    def get_command(self):
+        """Returns the current commanded servo states."""
+        with lock:
+            return {
+                "ok": True,
+                "mode": command.mode,
+                "positions": list(command.positions),   # Radians, valid in MODE_ANGLE
+                "velocities": list(command.velocities),
+                "raw_positions": list(command.raw_positions),   # Ticks, valid in MODE_RAW
+                "raw_velocities": list(command.raw_velocities),
+                "gripper": command.gripper,
+                "torque": command.torque,
+            }
 
     # ----- service telemetry -----
 

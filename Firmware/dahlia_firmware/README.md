@@ -47,6 +47,7 @@ that conduct their own calibration cannot drive joints beyond these stops.
 ```
 
 - `GET /feedback`, `POST /targets`, radian based API, similar to the `/motors` API.
+- `GET /command`, returns what is currently being *commanded* in both spaces, plus the active mode. This is the readback a recorder needs: the measured pose lags the command and settles onto it, so recording the measurement as the action would teach a policy to output the state it is already in.
 - `GET /health`, returns whether the SPI thread is alive, how old the last frame is, and the consecutive error count.
 
 
@@ -55,7 +56,11 @@ that conduct their own calibration cannot drive joints beyond these stops.
 
 
 ## Interfacing with LeRobot
-`brick_compose.yaml` publishes port 9000 on the board, so an off-board host can reach the raw API. See `Software/lerobot/lerobot_hxservo.py`, whose `port` is the service URL:
+`brick_compose.yaml` publishes port 9000 on the board, so an off-board host can reach the raw API. LeRobot runs on a PC through the `lerobot-dahlia` plugin in `Software/lerobot`, whose `--robot.port` is this service's URL.
+
+The SEC control loop stays on the board for latency, and LeRobot reads its output through `GET /command` rather than re-deriving it from the raw controller samples. `Software/lerobot/README.md` explains why re-deriving it would silently corrupt recorded episodes.
+
+Check the arm without LeRobot in the way:
 ```bash
-python Software/lerobot/lerobot_hxservo.py http://dahlia.local:9000
+python -m lerobot_dahlia.dahlia_bus http://dahlia.local:9000
 ```

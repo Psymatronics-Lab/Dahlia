@@ -35,7 +35,7 @@ the same protocol.
 
 Bring-up:
 
-    python lerobot_hxservo.py http://dahlia.local:9000
+    python -m lerobot_dahlia.dahlia_bus http://dahlia.local:9000
 """
 
 from __future__ import annotations
@@ -137,13 +137,27 @@ _WRITABLE = {
 }
 
 
+# As built: the shoulder carries the whole arm and gets the high torque servo, the
+# rest are HX-30HM. Resolution is 4096 across the family, so this only affects
+# reporting and the control table lookup, not any of the maths.
+JOINT_MODELS = {
+    "base": "hx-30hm",
+    "shoulder": "hx-65hm",
+    "elbow": "hx-30hm",
+    "wrist_pitch": "hx-30hm",
+    "wrist_roll": "hx-30hm",
+}
+
+
 def dahlia_motors(
-    joint_model: str = "hx-65hm",
+    joint_models: dict[str, str] | None = None,
     norm_mode: MotorNormMode = MotorNormMode.RANGE_M100_100,
 ) -> dict[str, Motor]:
     """The standard six-motor layout, ids matching joint_configs in the firmware."""
+    joint_models = JOINT_MODELS if joint_models is None else joint_models
+
     motors = {
-        name: Motor(id=index + 1, model=joint_model, norm_mode=norm_mode)
+        name: Motor(id=index + 1, model=joint_models[name], norm_mode=norm_mode)
         for index, name in enumerate(JOINT_NAMES)
     }
     # The clamp is driven by PWM, so its id is nominal; it is never addressed on the bus.
@@ -941,11 +955,15 @@ class HXServoMotorsBus(MotorsBusBase):
 if __name__ == "__main__":
     import sys
 
+    # Imported here rather than at module scope so the bus itself stays independent
+    # of the arm's calibration, which is what makes it reusable for bring-up.
+    from .dahlia_calibration import dahlia_calibration
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:9000"
+    url = sys.argv[1] if len(sys.argv) > 1 else "http://dahlia.local:9000"
 
-    bus = HXServoMotorsBus(url)
+    bus = HXServoMotorsBus(url, calibration=dahlia_calibration())
     bus.connect()
 
     try:
@@ -957,9 +975,7 @@ if __name__ == "__main__":
             print(f"  {name:<12} {values}")
 
         print("\nRaw positions:", bus.sync_read("Present_Position", normalize=False))
-
-        bus.reset_calibration()
-        print("Normalised with the default calibration:",
+        print("Normalised:",
               {k: round(v, 1) for k, v in bus.sync_read("Present_Position").items()})
 
     finally:

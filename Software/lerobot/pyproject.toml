@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot-dahlia"
+version = "0.1.0"
+description = "LeRobot plugin: the Dahlia arm robot and the SEC teleoperator."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "lerobot",
+    "requests",
+]
+
+[project.optional-dependencies]
+# The robot config declares a camera; installing this pulls the backend for it.
+camera = ["opencv-python"]
+
+[tool.setuptools]
+packages = ["lerobot_dahlia"]

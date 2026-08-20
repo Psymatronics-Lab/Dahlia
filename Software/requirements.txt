@@ -1,2 +1,7 @@
+# Software/perception
 opencv-python==5.0.0.93
+
+# The LeRobot plugin declares its own dependencies; install it in place instead:
+#   pip install -e Software/lerobot
 lerobot
+requests

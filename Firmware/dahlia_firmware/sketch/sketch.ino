@@ -6,7 +6,9 @@ static_assert(JOINT_COUNT == SPI_JOINT_COUNT, "Packet joint count must match the
 constexpr int SERVO_PERIOD_MS = 5;   // 200 Hz servo loop
 constexpr int SPI_STACK_SIZE = 2048;
 constexpr int SPI_PRIORITY = 5;
-constexpr float HOLD_VEL = 5.0f;   // Radians per second, matches JOINT_VEL on the host
+// Radians per second, matches JOINT_VEL on the host. 3400 ticks/s is the servo bus
+// ceiling in HXServo::write_pos_ex, so this is as fast as a joint can be driven.
+constexpr float HOLD_VEL = 5.2155f;
 
 // Timeout after which if new commands aren't received, arm holds its pose regardless of targets
 constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
@@ -106,7 +108,10 @@ void spi_task(void*, void*, void*){
 
 void setup(){
     Serial.begin(115200);
-    arm.initialize();
+
+    if (!arm.initialize()){
+        Serial.println("Startup: arm did not reach the zero pose, holding where it stopped");
+    }
 
     // Hold the startup pose until the host sends its first command
     shared.mode = MODE_HOLD;

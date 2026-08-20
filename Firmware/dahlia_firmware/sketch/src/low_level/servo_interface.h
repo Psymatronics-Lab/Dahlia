@@ -8,7 +8,18 @@ constexpr int END_EFFECTOR_PWM_PIN_INDEX = 0;
 constexpr int END_EFFECTOR_PERIOD_NS = 20000000;
 constexpr int END_EFFECTOR_OPEN_NS = 544000;
 constexpr int END_EFFECTOR_CLOSED_NS = 2400000;
-constexpr float RAD_PER_TICK = 0.0015f;
+constexpr float RAD_PER_TICK = 0.0015340f;   // 2*pi/4096, the resolution of the HX family
+
+// Initial servo command config to move to the zero pose.
+constexpr int INIT_PERIOD_MS = 5;
+constexpr unsigned long INIT_TIMEOUT_MS = 6000;
+constexpr int16_t INIT_TOLERANCE = 12;
+constexpr int16_t INIT_VEL = 900;
+constexpr int16_t INIT_ACC = 40;
+
+// Servo bus ceilings, from HXServo::write_pos_ex
+constexpr int16_t MAX_TICK_VEL = 3400;
+constexpr uint8_t MAX_TICK_ACC = 254;
 
 class EndEffector{
     public:
@@ -128,11 +139,10 @@ class DahliaArm{
     public:
         DahliaArm()
         : bus_servos(Serial1, 1000000),
-          end_effector(SIGPIN),
-          last_motion_update(0)
+          end_effector(SIGPIN)
         {}
 
-        void initialize(){
+        bool initialize(){
             bus_servos.begin();
 
             // Built from joint_configs to maintain single source of truth
@@ -141,10 +151,65 @@ class DahliaArm{
             }
 
             end_effector.initialize();
-            enable();
+
             refresh_state();
-            last_motion_update = millis();
+            for(int i = 0; i < JOINT_COUNT; i++){
+                joint_commands[i].target_pos = joint_states[i].current_pos;
+            }
+
+            enable();
+            return zero();
         }
+
+        /**
+         * @brief Drive every joint to its zero angle, blocking until the arm arrives.
+         * @return True if every joint reached zero before the timeout.
+         */
+        bool zero(){
+            for(int i = 0; i < JOINT_COUNT; i++){
+                joint_commands[i].target_pos = zero_pos((JointID)i);
+                joint_commands[i].target_vel = INIT_VEL;
+                joint_commands[i].target_acc = INIT_ACC;
+            }
+
+            unsigned long deadline = millis() + INIT_TIMEOUT_MS;
+            bool arrived = false;
+
+            while (!arrived && millis() < deadline){
+                refresh_state();
+                motion_update();
+                arrived = at_zero();
+                delay(INIT_PERIOD_MS);
+            }
+
+            // Hand the running limits back, as MODE_HOLD never writes a velocity
+            for(int i = 0; i < JOINT_COUNT; i++){
+                joint_commands[i].target_vel = MAX_TICK_VEL;
+                joint_commands[i].target_acc = MAX_TICK_ACC;
+            }
+
+            return arrived;
+        }
+
+        /**
+         * @brief Whether every joint is sitting at its zero angle.
+         */
+        bool at_zero(){
+            for(int i = 0; i < JOINT_COUNT; i++){
+                // Held in a variable, as Arduino's abs() is a macro and re-evaluates
+                int16_t error = joint_states[i].current_pos - zero_pos((JointID)i);
+
+                if (abs(error) > INIT_TOLERANCE){
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * @brief Tick position of a joint's zero angle, straight off its calibration.
+         */
+        int16_t zero_pos(JointID joint) const { return rad_to_pos(joint, 0.0f); }
 
         /**
          * @brief Set the target rotation angle of a servo (in radians).
@@ -199,14 +264,14 @@ class DahliaArm{
          * @brief Set the maximum slew rate of a servo in ticks per second.
          */
         void set_raw_vel(JointID joint, int16_t vel){
-            joint_commands[joint].target_vel = constrain(vel, (int16_t)0, (int16_t)3400);
+            joint_commands[joint].target_vel = constrain(vel, (int16_t)0, MAX_TICK_VEL);
         }
 
         /**
          * @brief Set the acceleration ramp of a servo in ticks per second squared.
          */
         void set_raw_acc(JointID joint, uint8_t acc){
-            joint_commands[joint].target_acc = min(acc, (uint8_t)254);
+            joint_commands[joint].target_acc = min(acc, MAX_TICK_ACC);
         }
 
         /**
@@ -323,11 +388,6 @@ class DahliaArm{
         void motion_update(){
             int16_t full_pos[JOINT_COUNT][4];
 
-            unsigned long now = millis();
-            float dt = (now - last_motion_update) * 0.001f;
-            dt = min(dt, 0.1f);
-            last_motion_update = now;
-
             for(int i = 0; i < JOINT_COUNT; i++){
                 // prevents position snapping after no-torque manual movement of the arm
                 if (!joint_states[i].torque_on){
@@ -338,11 +398,7 @@ class DahliaArm{
                 full_pos[i][0] = joint_configs[i].servo_id;
                 full_pos[i][1] = joint_command.target_acc;
                 full_pos[i][2] = joint_command.target_vel;
-                int16_t max_step = lround(joint_command.target_vel * dt);
-                int16_t target_pos = joint_command.target_pos;
-                int16_t current_pos = joint_states[i].current_pos;
-                int16_t step = constrain(target_pos - current_pos, -max_step, max_step);
-                full_pos[i][3] = current_pos + step;
+                full_pos[i][3] = joint_command.target_pos;
             }
 
             bus_servos.sync_write_pos_ex(full_pos, JOINT_COUNT);
@@ -385,10 +441,10 @@ class DahliaArm{
          * @brief Convert from rad/s to ticks/s for angular velocity.
          */
         int16_t rad_to_vel(float rad) const {
-            int16_t vel = lround(rad / RAD_PER_TICK);
-            if (vel > 3400){ vel = 3400; }
+            long vel = lround(rad / RAD_PER_TICK);
+            if (vel > MAX_TICK_VEL){ vel = MAX_TICK_VEL; }
             else if (vel < 0){ vel = 0; }
-            return vel;
+            return (int16_t)vel;
         }
 
         /**
@@ -400,13 +456,12 @@ class DahliaArm{
          * @brief Convert from rad/s^2 to ticks/s^2 for angular acceleration.
          */
         int16_t rad_to_acc(float rad) const {
-            int16_t acc = lround(rad / RAD_PER_TICK);
-            if (acc > 254){ acc = 254; }
+            long acc = lround(rad / RAD_PER_TICK);
+            if (acc > MAX_TICK_ACC){ acc = MAX_TICK_ACC; }
             else if (acc < 0){ acc = 0; }
-            return acc;
+            return (int16_t)acc;
         }
 
-        unsigned long last_motion_update;
         uint8_t servo_ids[JOINT_COUNT] = {0};   // Filled from joint_configs by initialize()
         HXServo bus_servos;
         JointConfig joint_configs[JOINT_COUNT] = {

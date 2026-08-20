@@ -8,7 +8,7 @@ from spi_service import SPIService
 
 CONTROLLER_URL = "http://172.17.0.1:8000/controller"
 
-JOINT_VEL = 5.0   # Constant velocity limit sent for every joint, near the servo maximum
+JOINT_VEL = 5.2155   # Velocity limit sent for every joint, 3400 ticks/s is the servo maximum
 
 spi = SPIService()
 arm = ArmController()
