@@ -12,7 +12,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from lerobot.cameras import CameraConfig, ColorMode, Cv2Rotation, make_cameras_from_configs
+from lerobot.cameras import (
+    CameraConfig,
+    ColorMode,
+    Cv2Backends,
+    Cv2Rotation,
+    make_cameras_from_configs,
+)
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.robots import Robot, RobotConfig
 
@@ -24,6 +30,62 @@ logger = logging.getLogger(__name__)
 # Every actuated joint, in the order the firmware packs them, clamp last.
 MOTOR_NAMES = (*JOINT_NAMES, GRIPPER_NAME)
 
+# The two views. `wrist` is LeRobot's name for an end effector mounted camera, which
+# is what its policies and dataset tooling expect to find; `overhead` is the fixed
+# view of the workspace. These strings become observation keys and therefore dataset
+# feature names, so renaming them later orphans anything already recorded.
+WRIST_CAMERA = "wrist"
+OVERHEAD_CAMERA = "overhead"
+
+# OpenCV numbers devices by enumeration order, so which index is which camera depends
+# on the machine and on what was plugged in first. There is no default worth
+# guessing: run `lerobot-find-cameras opencv` and set these for your setup, or pass
+# --robot.cameras= on the command line to override the pair wholesale.
+WRIST_CAMERA_INDEX: int | str = 1
+OVERHEAD_CAMERA_INDEX: int | str = 2   # Unused while the overhead view is commented out
+
+# DirectShow rather than the Windows default, which is slow to open and unreliable
+# with two streams. Use Cv2Backends.V4L2 on Linux, or ANY to let OpenCV choose.
+CAMERA_BACKEND = Cv2Backends.DSHOW
+
+# Two uncompressed streams at this size do not fit through one USB controller, so the
+# second camera opens and then starves. MJPG is what makes the pair work; drop it to
+# None if a camera refuses the format and lower the resolution instead.
+CAMERA_FOURCC: str | None = "MJPG"
+
+CAMERA_FPS = 15
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+
+
+def dahlia_cameras(
+    wrist_index: int | str = WRIST_CAMERA_INDEX,
+    # overhead_index: int | str = OVERHEAD_CAMERA_INDEX,
+) -> dict[str, CameraConfig]:
+    """The end effector view. The overhead view is commented out for now.
+
+    Both were configured identically so the two image streams in a dataset would
+    differ only by viewpoint, which is one less thing to account for when a policy
+    consumes them. Uncomment the parameter and the dict entry below to restore it.
+    """
+
+    def view(index: int | str) -> OpenCVCameraConfig:
+        return OpenCVCameraConfig(
+            index_or_path=index,
+            fps=CAMERA_FPS,
+            width=CAMERA_WIDTH,
+            height=CAMERA_HEIGHT,
+            color_mode=ColorMode.RGB,
+            rotation=Cv2Rotation.NO_ROTATION,
+            fourcc=CAMERA_FOURCC,
+            backend=CAMERA_BACKEND,
+        )
+
+    return {
+        WRIST_CAMERA: view(wrist_index),
+        # OVERHEAD_CAMERA: view(overhead_index),
+    }
+
 
 @RobotConfig.register_subclass("dahlia")
 @dataclass
@@ -32,18 +94,7 @@ class DahliaRobotConfig(RobotConfig):
     # plain --robot.port on the command line.
     port: str
 
-    cameras: dict[str, CameraConfig] = field(
-        default_factory=lambda: {
-            "cam_1": OpenCVCameraConfig(
-                index_or_path=1,
-                fps=15,
-                width=1280,
-                height=720,
-                color_mode=ColorMode.RGB,
-                rotation=Cv2Rotation.NO_ROTATION,
-            ),
-        }
-    )
+    cameras: dict[str, CameraConfig] = field(default_factory=dahlia_cameras)
 
     # Torque is left enabled on disconnect by default: the arm holds its pose instead
     # of dropping under its own weight the moment a script ends.

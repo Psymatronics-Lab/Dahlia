@@ -1,0 +1,24 @@
+{
+    "_comment": [
+        "Subassembly names for dahlia_m1_full, passed to urdf_merge_subassemblies.py",
+        "via --name-map.",
+        "",
+        "Keyed by DRIVING JOINT, not by link name. Onshape renumbers part instances",
+        "between exports: one re-export swapped servo_horn_4hole_1 and _4 between the",
+        "base rotation and the shoulder, so a link-keyed map put the wrong name on the",
+        "wrong body while still validating cleanly. Joint names are authored, so they",
+        "survive re-export.",
+        "",
+        "'root' is keyed by link because no joint drives it, and is already named",
+        "sensibly, as is ef_gear. The clamps are exported as ef_clamp and ef_clamp_1,",
+        "so they are renamed by the prismatic joint that drives each side."
+    ],
+
+    "joint:joint_baserotate": "base_rotate",
+    "joint:joint_shoulder": "upper_arm",
+    "joint:joint_elbow": "lower_arm",
+    "joint:joint_wristpitch": "wrist",
+    "joint:joint_wristroll": "end_effector",
+    "joint:prismatic_left_clamp": "ef_clamp_left",
+    "joint:prismatic_right_clamp": "ef_clamp_right"
+}

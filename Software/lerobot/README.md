@@ -85,6 +85,29 @@ The default is the safe direction: forgetting the flag on a replay leaves the ar
 
 Driving also needs the SEC path to actually stand down, which does not require stopping the App Lab application — `main.py` only posts `/targets` while the controller is connected, so disconnecting the SEC is enough. If you drive while the command space is still set to radians, `send_action()` warns once rather than fighting quietly.
 
+## Cameras
+
+The views recorded into every episode:
+
+| Key | Mounting | Observation feature | |
+|---|---|---|---|
+| `wrist` | on the end effector | `observation.images.wrist` | active, device index 1 |
+| `overhead` | fixed above the workspace | `observation.images.overhead` | commented out in `dahlia_cameras()` |
+
+Only the wrist view is live at the moment. Restoring the overhead one is uncommenting its parameter and its dict entry in `dahlia_cameras()`, but note that adding a camera changes `observation_features`, so episodes recorded with one view and with two are not the same dataset.
+
+`wrist` is LeRobot's name for an end effector camera, so datasets and policy configs that expect that key line up without remapping. It sits alongside the `wrist_pitch` and `wrist_roll` *joints*, which are a different thing — joints always carry a `.pos` suffix, cameras never do.
+
+Device indices are per machine, because OpenCV numbers cameras by enumeration order. `lerobot-find-cameras opencv` lists what is attached; set `WRIST_CAMERA_INDEX` and `OVERHEAD_CAMERA_INDEX` in `dahlia_robot.py`, or override the pair on the command line:
+
+```bash
+--robot.cameras='{ wrist: {type: opencv, index_or_path: 1, width: 1280, height: 720, fps: 15}, overhead: {type: opencv, index_or_path: 2, width: 1280, height: 720, fps: 15}}'
+```
+
+Both are MJPG at 1280x720/15 through the DirectShow backend. MJPG is not cosmetic: two uncompressed streams of this size do not fit through one USB controller, and the second camera opens and then starves. If a camera refuses the format, set `CAMERA_FOURCC = None` and drop the resolution instead, and put the two cameras on separate USB controllers rather than a shared hub.
+
+There are no intrinsics or extrinsics here. LeRobot treats a camera as an image source — `OpenCVCameraConfig` carries only index, size, fps, colour and rotation — and its policies learn from pixels, so nothing in the record or replay path needs a calibrated camera. Mapping an overhead detection into arm coordinates, or hand-eye calibrating the wrist camera against the URDF, would need both, but that belongs with `Software/perception/` rather than here.
+
 ## Bring-up
 Check the bus on its own, without LeRobot:
 ```bash
